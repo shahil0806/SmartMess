@@ -1,0 +1,2245 @@
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    session,
+    render_template_string,
+    jsonify,
+    send_from_directory
+)
+
+import sqlite3
+import os
+import secrets
+import string
+import base64
+from io import BytesIO
+from datetime import datetime, timedelta
+
+import qrcode
+import requests
+
+GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzRjb3Xh_O95l9N18VJKhUVs6-4qb99Ybr60zmyxIp-amMOtBPnFzArpyJo2tlyl1zE/exec"
+# =========================================================
+# BASIC SETTINGS
+# =========================================================
+
+app = Flask(__name__)
+
+app.secret_key = "SMART_MESS_CHANGE_THIS_SECRET_2026"
+
+ADMIN_PASSWORD = "shahil123"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "smart_mess.db")
+PHOTO_DIR = os.path.join(BASE_DIR, "photos")
+
+os.makedirs(PHOTO_DIR, exist_ok=True)
+
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+def db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS students (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_uid TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            roll_number TEXT UNIQUE NOT NULL,
+            branch TEXT NOT NULL,
+            hostel_room TEXT NOT NULL,
+            photo_filename TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS coupons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT UNIQUE NOT NULL,
+            student_uid TEXT NOT NULL,
+            meal TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            status TEXT NOT NULL DEFAULT 'ACTIVE'
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def current_time():
+    return datetime.now()
+
+
+def make_student_uid():
+    return "STU-" + secrets.token_hex(5).upper()
+
+
+def make_coupon_token():
+    chars = string.ascii_uppercase + string.digits
+    return "CPN-" + "".join(
+        secrets.choice(chars) for _ in range(20)
+    )
+
+
+def admin_required():
+    return session.get("admin") is True
+
+
+def image_data_uri(filename):
+    if not filename:
+        return ""
+
+    path = os.path.join(PHOTO_DIR, filename)
+
+    if not os.path.exists(path):
+        return ""
+
+    try:
+        with open(path, "rb") as f:
+            encoded = base64.b64encode(
+                f.read()
+            ).decode("utf-8")
+
+        ext = os.path.splitext(filename)[1].lower()
+
+        mime = "image/jpeg"
+
+        if ext == ".png":
+            mime = "image/png"
+        elif ext == ".webp":
+            mime = "image/webp"
+
+        return f"data:{mime};base64,{encoded}"
+
+    except Exception:
+        return ""
+
+
+def qr_data_uri(text):
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=8,
+        border=3
+    )
+
+    qr.add_data(text)
+    qr.make(fit=True)
+
+    image = qr.make_image(
+        fill_color="black",
+        back_color="white"
+    )
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    encoded = base64.b64encode(
+        buffer.getvalue()
+    ).decode("utf-8")
+
+    return "data:image/png;base64," + encoded
+
+
+# =========================================================
+# COMMON CSS
+# =========================================================
+
+CSS = """
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #f3f4f6;
+    font-family: Arial, Helvetica, sans-serif;
+    color: #111827;
+}
+
+.container {
+    width: 94%;
+    max-width: 1150px;
+    margin: 30px auto;
+}
+
+.card {
+    background: #ffffff;
+    padding: 24px;
+    border-radius: 18px;
+    margin-bottom: 20px;
+    box-shadow: 0 8px 25px rgba(0,0,0,.07);
+}
+
+.nav {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.btn {
+    display: inline-block;
+    padding: 12px 17px;
+    background: #111827;
+    color: white;
+    text-decoration: none;
+    border-radius: 10px;
+    border: 0;
+    cursor: pointer;
+}
+
+.green {
+    background: #16a34a;
+}
+
+.blue {
+    background: #2563eb;
+}
+
+.red {
+    background: #dc2626;
+}
+
+.gray {
+    background: #6b7280;
+}
+
+input,
+select {
+    width: 100%;
+    padding: 13px;
+    margin: 7px 0 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    font-size: 15px;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+}
+
+.stat {
+    background: white;
+    padding: 20px;
+    border-radius: 16px;
+}
+
+.stat h2 {
+    margin: 5px 0 0;
+    font-size: 30px;
+}
+
+.message {
+    padding: 14px;
+    border-radius: 10px;
+    margin-bottom: 16px;
+    background: #eff6ff;
+}
+
+.success {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.error {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.center {
+    text-align: center;
+}
+
+.photo {
+    width: 65px;
+    height: 65px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.big-photo {
+    width: 140px;
+    height: 140px;
+    object-fit: cover;
+    border-radius: 20px;
+}
+
+.qr {
+    width: 270px;
+    max-width: 95%;
+}
+
+.countdown {
+    font-size: 30px;
+    font-weight: bold;
+    margin: 15px 0;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    padding: 11px;
+    border-bottom: 1px solid #e5e7eb;
+    text-align: left;
+}
+
+.badge {
+    display: inline-block;
+    padding: 5px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.active-badge {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.used-badge {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.expired-badge {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.meal-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+
+.meal-buttons button {
+    padding: 16px;
+    border: 0;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+    background: #111827;
+    color: white;
+}
+
+@media(max-width: 650px) {
+    .meal-buttons {
+        grid-template-columns: 1fr;
+    }
+
+    table {
+        font-size: 12px;
+    }
+}
+</style>
+"""
+
+
+# =========================================================
+# ROOT
+# =========================================================
+
+@app.route("/")
+def root():
+    return redirect(url_for("student_home"))
+
+
+# =========================================================
+# ADMIN LOGIN
+# =========================================================
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin_login():
+
+    if admin_required():
+        return redirect(url_for("admin_dashboard"))
+
+    error = ""
+
+    if request.method == "POST":
+
+        password = request.form.get("password", "")
+
+        if password == ADMIN_PASSWORD:
+
+            session["admin"] = True
+
+            return redirect(url_for("admin_dashboard"))
+
+        error = "Wrong admin password."
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Admin Login</title>
+        {CSS}
+    </head>
+
+    <body>
+    <div class="container">
+
+        <div class="card" style="max-width:500px;margin:80px auto;">
+
+            <h1>🔐 Admin Login</h1>
+
+            {'<div class="message error">' + error + '</div>'
+             if error else ''}
+
+            <form method="POST">
+
+                <label>Admin Password</label>
+
+                <input
+                    type="password"
+                    name="password"
+                    required
+                >
+
+                <button class="btn" type="submit">
+                    Login
+                </button>
+
+            </form>
+
+        </div>
+
+    </div>
+    </body>
+    </html>
+    """
+
+    return html
+
+
+@app.route("/admin/logout")
+def admin_logout():
+
+    session.pop("admin", None)
+
+    return redirect(url_for("admin_login"))
+
+# =========================================================
+# ADMIN VERIFY COUPON
+# =========================================================
+
+@app.route("/admin/verify-coupon", methods=["POST"])
+def verify_coupon():
+
+    if not admin_required():
+        return jsonify({
+            "success": False,
+            "message": "Admin login required."
+        }), 401
+
+    data = request.get_json(silent=True) or {}
+
+    token = str(
+        data.get("token", "")
+    ).strip()
+
+    if not token:
+        return jsonify({
+            "success": False,
+            "message": "Invalid QR."
+        }), 400
+
+    conn = db()
+
+    # ---------------------------------------------------------
+    # FIND COUPON
+    # ---------------------------------------------------------
+
+    coupon = conn.execute("""
+        SELECT *
+        FROM coupons
+        WHERE token = ?
+    """, (token,)).fetchone()
+
+    if not coupon:
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Coupon not found."
+        }), 404
+
+    # ---------------------------------------------------------
+    # CHECK ALREADY USED
+    # ---------------------------------------------------------
+
+    if coupon["status"] == "USED":
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Coupon already used."
+        })
+
+    # ---------------------------------------------------------
+    # CHECK EXPIRY
+    # ---------------------------------------------------------
+
+    expiry = datetime.strptime(
+        coupon["expires_at"],
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    if current_time() > expiry:
+
+        conn.execute("""
+            UPDATE coupons
+            SET status = 'EXPIRED'
+            WHERE id = ?
+        """, (coupon["id"],))
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Coupon expired. 5-minute validity ended."
+        })
+
+    # ---------------------------------------------------------
+    # FIND STUDENT
+    # ---------------------------------------------------------
+
+    student = conn.execute("""
+        SELECT *
+        FROM students
+        WHERE student_uid = ?
+        AND active = 1
+    """, (
+        coupon["student_uid"],
+    )).fetchone()
+
+    if not student:
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Student is not active."
+        })
+
+    # ---------------------------------------------------------
+    # MARK COUPON AS USED
+    # ---------------------------------------------------------
+
+    used_time = current_time().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    cursor = conn.execute("""
+        UPDATE coupons
+        SET status = 'USED',
+            used_at = ?
+        WHERE id = ?
+        AND status = 'ACTIVE'
+    """, (
+        used_time,
+        coupon["id"]
+    ))
+
+    conn.commit()
+
+    if cursor.rowcount != 1:
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Coupon was already used."
+        })
+
+    # ---------------------------------------------------------
+    # SAVE SUCCESSFUL SCAN TO GOOGLE SHEET
+    # ---------------------------------------------------------
+    try:
+
+        now = current_time()
+
+        response = requests.post(
+            GOOGLE_SHEET_URL,
+            json={
+                "date": now.strftime("%d-%m-%Y"),
+                "time": now.strftime("%I:%M:%S %p"),
+                "name": student["name"],
+                "roll": student["roll_number"],
+                "branch": student["branch"],
+                "room": student["hostel_room"],
+                "meal": coupon["meal"],
+                "status": "USED"
+            },
+            timeout=10
+        )
+
+        print(
+            "GOOGLE SHEET:",
+            response.status_code,
+            response.text
+        )
+
+    except Exception as e:
+
+        print(
+            "Google Sheet Error:",
+            e
+        )
+    # ---------------------------------------------------------
+    # STUDENT PHOTO
+    # ---------------------------------------------------------
+
+    photo_url = ""
+
+    if student["photo_filename"]:
+
+        photo_url = (
+            "/student-photo/"
+            + str(student["id"])
+        )
+
+    conn.close()
+
+    # ---------------------------------------------------------
+    # SUCCESS RESPONSE
+    # ---------------------------------------------------------
+
+    return jsonify({
+        "success": True,
+        "name": student["name"],
+        "roll": student["roll_number"],
+        "branch": student["branch"],
+        "room": student["hostel_room"],
+        "meal": coupon["meal"],
+        "photo": photo_url
+    })# =========================================================
+# ADMIN DASHBOARD
+# =========================================================
+
+@app.route("/admin/dashboard")
+def admin_dashboard():
+
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+
+    today = current_time().strftime("%Y-%m-%d")
+
+    conn = db()
+
+    student_count = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM students
+        WHERE active = 1
+    """).fetchone()["c"]
+
+    breakfast = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM coupons
+        WHERE meal = 'BREAKFAST'
+        AND status = 'USED'
+        AND substr(generated_at, 1, 10) = ?
+    """, (today,)).fetchone()["c"]
+
+    lunch = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM coupons
+        WHERE meal = 'LUNCH'
+        AND status = 'USED'
+        AND substr(generated_at, 1, 10) = ?
+    """, (today,)).fetchone()["c"]
+
+    dinner = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM coupons
+        WHERE meal = 'DINNER'
+        AND status = 'USED'
+        AND substr(generated_at, 1, 10) = ?
+    """, (today,)).fetchone()["c"]
+
+    conn.close()
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Admin Dashboard</title>
+        {CSS}
+    </head>
+
+    <body>
+    <div class="container">
+
+        <h1>🍽️ Smart Mess Admin Panel</h1>
+
+        <div class="nav">
+
+            <a class="btn" href="/admin/dashboard">
+                Dashboard
+            </a>
+
+            <a class="btn green" href="/admin/add-student">
+                ➕ Register Student
+            </a>
+
+            <a class="btn blue" href="/admin/students">
+                👨‍🎓 Students
+            </a>
+
+            <a class="btn" href="/admin/scanner">
+                📷 Scanner
+            </a>
+
+            <a class="btn gray" href="/admin/records">
+                📊 Records
+            </a>
+
+            <a class="btn red" href="/admin/logout">
+                Logout
+            </a>
+
+        </div>
+
+        <div class="grid">
+
+            <div class="stat">
+                <div>Hostel Students</div>
+                <h2>{student_count}</h2>
+            </div>
+
+            <div class="stat">
+                <div>Breakfast Today</div>
+                <h2>{breakfast}</h2>
+            </div>
+
+            <div class="stat">
+                <div>Lunch Today</div>
+                <h2>{lunch}</h2>
+            </div>
+
+            <div class="stat">
+                <div>Dinner Today</div>
+                <h2>{dinner}</h2>
+            </div>
+
+        </div>
+
+        <div class="card">
+            <h2>How it works</h2>
+
+            <p>
+                Admin registers hostel students with photo.
+            </p>
+
+            <p>
+                Student uses the Student Panel to generate
+                a meal coupon.
+            </p>
+
+            <p>
+                Coupon QR is valid for 5 minutes and can
+                be used only once.
+            </p>
+
+        </div>
+
+    </div>
+    </body>
+    </html>
+    """
+
+    return html
+
+
+# =========================================================
+# ADMIN - ADD STUDENT
+# =========================================================
+
+
+@app.route("/admin/add-student", methods=["GET", "POST"])
+def admin_add_student():
+
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+
+    message = ""
+    message_class = "message"
+
+    if request.method == "POST":
+
+        name = request.form.get("name", "").strip()
+        roll = request.form.get("roll_number", "").strip()
+        branch = request.form.get("branch", "").strip()
+        room = request.form.get("hostel_room", "").strip()
+        photo = request.files.get("photo")
+
+        if not name or not roll or not branch or not room:
+
+            message = "Please fill every field."
+            message_class = "message error"
+
+        elif not photo or not photo.filename:
+
+            message = "Student photo is required."
+            message_class = "message error"
+
+        else:
+
+            conn = db()
+
+            exists = conn.execute("""
+                SELECT id
+                FROM students
+                WHERE roll_number = ?
+            """, (roll,)).fetchone()
+
+            if exists:
+
+                conn.close()
+
+                message = "This roll number is already registered."
+                message_class = "message error"
+
+            else:
+
+                uid = make_student_uid()
+
+                ext = os.path.splitext(
+                    photo.filename
+                )[1].lower()
+
+                if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+
+                    conn.close()
+
+                    message = "Use JPG, JPEG, PNG or WEBP."
+                    message_class = "message error"
+
+                else:
+
+                    filename = uid + ext
+
+                    photo.save(
+                        os.path.join(
+                            PHOTO_DIR,
+                            filename
+                        )
+                    )
+
+                    conn.execute("""
+                        INSERT INTO students
+                        (
+                            student_uid,
+                            name,
+                            roll_number,
+                            branch,
+                            hostel_room,
+                            photo_filename,
+                            active,
+                            created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                    """, (
+                        uid,
+                        name,
+                        roll,
+                        branch,
+                        room,
+                        filename,
+                        current_time().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                    ))
+
+                    conn.commit()
+                    conn.close()
+
+                    message = (
+                        "Student registered successfully. "
+                        f"Student ID: {uid}"
+                    )
+
+                    message_class = "message success"
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Register Student</title>
+        {CSS}
+    </head>
+
+    <body>
+    <div class="container">
+
+        <div class="nav">
+            <a class="btn" href="/admin/dashboard">
+                Dashboard
+            </a>
+            <a class="btn blue" href="/admin/students">
+                Students
+            </a>
+        </div>
+
+        <div class="card">
+
+            <h1>👨‍🎓 Register Hostel Student</h1>
+
+            {'<div class="' + message_class + '">' +
+             message + '</div>' if message else ''}
+
+            <form
+                method="POST"
+                enctype="multipart/form-data"
+            >
+
+                <label>Student Name</label>
+
+                <input
+                    type="text"
+                    name="name"
+                    required
+                >
+
+                <label>Roll Number</label>
+
+                <input
+                    type="text"
+                    name="roll_number"
+                    required
+                >
+
+                <label>Branch</label>
+
+                <input
+                    type="text"
+                    name="branch"
+                    placeholder="AI & ML / Electrical / etc."
+                    required
+                >
+
+                <label>Hostel Room</label>
+
+                <input
+                    type="text"
+                    name="hostel_room"
+                    required
+                >
+
+                <label>Student Photo</label>
+
+                <input
+                    type="file"
+                    name="photo"
+                    accept="image/*"
+                    required
+                >
+
+                <button class="btn green" type="submit">
+                    Register Student
+                </button>
+
+            </form>
+
+        </div>
+
+    </div>
+    </body>
+    </html>
+    """
+
+    return html
+
+
+# =========================================================
+# ADMIN - STUDENT LIST
+# =========================================================
+
+@app.route("/admin/students")
+def admin_students():
+
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+
+    conn = db()
+
+    students = conn.execute("""
+        SELECT *
+        FROM students
+        ORDER BY name
+    """).fetchall()
+
+    conn.close()
+
+    rows = ""
+
+    for student in students:
+
+        photo = "No Photo"
+
+        if student["photo_filename"]:
+
+            photo = f"""
+                <img
+                    class="photo"
+                    src="/student-photo/{student['id']}"
+                >
+            """
+
+        status = (
+            '<span class="badge active-badge">ACTIVE</span>'
+            if student["active"]
+            else
+            '<span class="badge expired-badge">INACTIVE</span>'
+        )
+
+        rows += f"""
+        <tr>
+
+            <td>{photo}</td>
+            <td>{student["name"]}</td>
+            <td>{student["roll_number"]}</td>
+            <td>{student["branch"]}</td>
+            <td>{student["hostel_room"]}</td>
+            <td>{student["student_uid"]}</td>
+            <td>{status}</td>
+
+        </tr>
+        """
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Students</title>
+        {CSS}
+    </head>
+
+    <body>
+
+    <div class="container">
+
+        <div class="nav">
+
+            <a class="btn" href="/admin/dashboard">
+                Dashboard
+            </a>
+
+            <a class="btn green" href="/admin/add-student">
+                Register Student
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h1>👨‍🎓 Hostel Students</h1>
+
+            <div style="overflow-x:auto;">
+
+                <table>
+
+                    <tr>
+                        <th>Photo</th>
+                        <th>Name</th>
+                        <th>Roll</th>
+                        <th>Branch</th>
+                        <th>Room</th>
+                        <th>Student ID</th>
+                        <th>Status</th>
+                    </tr>
+
+                    {rows}
+
+                </table>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """
+
+    return html
+
+
+# =========================================================
+# STUDENT PHOTO
+# =========================================================
+
+@app.route("/student-photo/<int:student_id>")
+def student_photo(student_id):
+
+    conn = db()
+
+    student = conn.execute("""
+        SELECT photo_filename
+        FROM students
+        WHERE id = ?
+    """, (student_id,)).fetchone()
+
+    conn.close()
+
+    if not student or not student["photo_filename"]:
+        return "Photo not found", 404
+
+    return send_from_directory(
+        PHOTO_DIR,
+        student["photo_filename"]
+    )
+
+
+# =========================================================
+# STUDENT PANEL
+# =========================================================
+
+@app.route("/student")
+def student_home():
+
+    # Student session is not required permanently.
+    # Roll number verification is done before coupon generation.
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+
+        <title>Student Panel</title>
+
+        {CSS}
+
+    </head>
+
+    <body>
+
+    <div class="container">
+
+        <div class="card" style="max-width:650px;margin:40px auto;">
+
+            <div class="center">
+
+                <h1>🍽️ Smart Mess Student Panel</h1>
+
+                <p>
+                    Hostel student apna Roll Number enter kare.
+                </p>
+
+            </div>
+
+            <form method="POST" action="/student/verify">
+
+                <label>Roll Number</label>
+
+                <input
+                    type="text"
+                    name="roll_number"
+                    placeholder="Enter your roll number"
+                    required
+                >
+
+                <button class="btn blue" type="submit">
+                    Verify Student
+                </button>
+
+            </form>
+
+            <hr style="margin:25px 0;">
+
+            <p class="center">
+                Outside / unregistered student ko coupon
+                generate nahi hoga.
+            </p>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """
+
+    return html
+
+
+@app.route("/student/verify", methods=["POST"])
+def student_verify():
+
+    roll = request.form.get(
+        "roll_number",
+        ""
+    ).strip()
+
+    conn = db()
+
+    student = conn.execute("""
+        SELECT *
+        FROM students
+        WHERE roll_number = ?
+        AND active = 1
+    """, (roll,)).fetchone()
+
+    conn.close()
+
+    if not student:
+
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>{CSS}</head>
+        <body>
+
+        <div class="container">
+
+            <div class="card center">
+
+                <h1>❌ Student Not Found</h1>
+
+                <div class="message error">
+                    This student is not registered as an
+                    active hostel student.
+                    Coupon cannot be generated.
+                </div>
+
+                <a class="btn" href="/student">
+                    Try Again
+                </a>
+
+                </div>
+
+        </div>
+
+        </body>
+        </html>
+        """
+
+    session["student_uid"] = student["student_uid"]
+
+    return redirect(
+        url_for(
+            "student_meals"
+        )
+    )
+
+
+# =========================================================
+# STUDENT MEAL PAGE
+# =========================================================
+
+@app.route("/student/meals")
+def student_meals():
+
+    student_uid = session.get("student_uid")
+
+    if not student_uid:
+        return redirect(url_for("student_home"))
+
+    conn = db()
+
+    student = conn.execute("""
+        SELECT *
+        FROM students
+        WHERE student_uid = ?
+        AND active = 1
+    """, (student_uid,)).fetchone()
+
+    conn.close()
+
+    if not student:
+
+        session.pop("student_uid", None)
+
+        return redirect(
+            url_for("student_home")
+        )
+
+    photo = ""
+
+    if student["photo_filename"]:
+
+        photo = image_data_uri(
+            student["photo_filename"]
+        )
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Student Meals</title>
+        {CSS}
+    </head>
+
+    <body>
+
+    <div class="container">
+
+        <div class="card center">
+
+            {(
+                '<img class="big-photo" src="' +
+                photo +
+                '">'
+            ) if photo else ''}
+
+            <h1>
+                Hello, {student["name"]} 👋
+            </h1>
+
+            <p>
+                Roll: <b>{student["roll_number"]}</b>
+            </p>
+
+            <p>
+                Branch: <b>{student["branch"]}</b>
+            </p>
+
+            <p>
+                Room: <b>{student["hostel_room"]}</b>
+            </p>
+
+        </div>
+
+
+        <div class="card">
+
+            <h2 class="center">
+                Select Meal
+            </h2>
+
+            <div class="meal-buttons">
+
+                <form
+                    method="POST"
+                    action="/student/generate"
+                >
+
+                    <input
+                        type="hidden"
+                        name="meal"
+                        value="BREAKFAST"
+                    >
+
+                    <button type="submit">
+                        🌅 Breakfast
+                    </button>
+
+                </form>
+
+
+                <form
+                    method="POST"
+                    action="/student/generate"
+                >
+
+                    <input
+                        type="hidden"
+                        name="meal"
+                        value="LUNCH"
+                    >
+
+                    <button type="submit">
+                        ☀️ Lunch
+                    </button>
+
+                </form>
+
+
+                <form
+                    method="POST"
+                    action="/student/generate"
+                >
+
+                    <input
+                        type="hidden"
+                        name="meal"
+                        value="DINNER"
+                    >
+
+                    <button type="submit">
+                        🌙 Dinner
+                    </button>
+
+                </form>
+
+            </div>
+
+        </div>
+
+
+        <div class="card center">
+
+            <a
+                class="btn red"
+                href="/student/logout"
+            >
+                Student Logout
+            </a>
+
+        </div>
+
+    </div>
+
+    </body>
+    </html>
+    """
+
+    return html
+
+
+# =========================================================
+# STUDENT GENERATE COUPON
+# =========================================================
+
+@app.route("/student/generate", methods=["POST"])
+def student_generate():
+
+    student_uid = session.get("student_uid")
+
+    if not student_uid:
+
+        return redirect(
+            url_for("student_home")
+        )
+
+    meal = request.form.get(
+        "meal",
+        ""
+    ).upper()
+
+    if meal not in [
+        "BREAKFAST",
+        "LUNCH",
+        "DINNER"
+    ]:
+
+        return "Invalid meal.", 400
+
+    conn = db()
+
+    student = conn.execute("""
+        SELECT *
+        FROM students
+        WHERE student_uid = ?
+        AND active = 1
+    """, (student_uid,)).fetchone()
+
+    if not student:
+
+        conn.close()
+
+        return redirect(
+            url_for("student_home")
+        )
+
+    # -----------------------------------------------------
+    # Check today's same meal
+    # -----------------------------------------------------
+
+    today = current_time().strftime("%Y-%m-%d")
+
+    existing = conn.execute("""
+        SELECT *
+        FROM coupons
+        WHERE student_uid = ?
+        AND meal = ?
+        AND substr(generated_at, 1, 10) = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (
+        student_uid,
+        meal,
+        today
+    )).fetchone()
+
+    if existing:
+
+        if existing["status"] == "USED":
+
+            conn.close()
+
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head>{CSS}</head>
+            <body>
+
+            <div class="container">
+
+                <div class="card center">
+
+                    <h1>❌ Already Used</h1>
+
+                    <div class="message error">
+
+                        Your {meal.title()} coupon
+                        has already been used today.
+
+                    </div>
+
+                    <a
+                        class="btn"
+                        href="/student/meals"
+                    >
+                        Back
+                    </a>
+
+                </div>
+
+            </div>
+
+            </body>
+            </html>
+            """
+
+        if existing["status"] == "ACTIVE":
+
+            expiry = datetime.strptime(
+                existing["expires_at"],
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            if current_time() < expiry:
+
+                conn.close()
+
+                # Show existing active coupon.
+                return render_coupon(
+                    student,
+                    existing
+                )
+
+            else:
+
+                conn.execute("""
+                    UPDATE coupons
+                    SET status = 'EXPIRED'
+                    WHERE id = ?
+                """, (existing["id"],))
+
+                conn.commit()
+
+    # -----------------------------------------------------
+    # Create new coupon
+    # -----------------------------------------------------
+
+    generated = current_time()
+
+    expires = generated + timedelta(minutes=5)
+
+    token = make_coupon_token()
+
+    conn.execute("""
+        INSERT INTO coupons
+        (
+            token,
+            student_uid,
+            meal,
+            generated_at,
+            expires_at,
+            status
+        )
+        VALUES (?, ?, ?, ?, ?, 'ACTIVE')
+    """, (
+        token,
+        student_uid,
+        meal,
+        generated.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        expires.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+    ))
+
+    conn.commit()
+
+    coupon = conn.execute("""
+        SELECT *
+        FROM coupons
+        WHERE token = ?
+    """, (token,)).fetchone()
+
+    conn.close()
+
+    return render_coupon(
+        student,
+        coupon
+    )
+
+
+# =========================================================
+# COUPON HTML
+# =========================================================
+
+def render_coupon(student, coupon):
+
+    photo = ""
+
+    if student["photo_filename"]:
+
+        photo = image_data_uri(
+            student["photo_filename"]
+        )
+
+    qr = qr_data_uri(
+        coupon["token"]
+    )
+
+    expires = datetime.strptime(
+        coupon["expires_at"],
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    expires_iso = expires.isoformat()
+
+    meal_name = coupon["meal"].title()
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+
+    <head>
+
+        <title>Mess Coupon</title>
+
+        {CSS}
+
+    </head>
+
+    <body>
+
+    <div class="container">
+
+        <div class="card center">
+
+            <h1>🎫 Meal Coupon</h1>
+
+            {(
+                '<img class="big-photo" src="' +
+                photo +
+                '">'
+            ) if photo else ''}
+
+            <h2>
+                {student["name"]}
+            </h2>
+
+            <p>
+                Roll Number:
+                <b>{student["roll_number"]}</b>
+            </p>
+
+            <p>
+                Branch:
+                <b>{student["branch"]}</b>
+            </p>
+
+            <p>
+                Hostel Room:
+                <b>{student["hostel_room"]}</b>
+            </p>
+
+            <h2>
+                🍽️ {meal_name}
+            </h2>
+
+            <img
+                class="qr"
+                src="{qr}"
+                alt="Secure Coupon QR"
+            >
+
+            <p>
+                Show this QR at the mess scanner.
+            </p>
+
+            <div
+                id="timer"
+                class="countdown"
+            >
+                05:00
+            </div>
+
+            <p>
+                Valid for 5 minutes only.
+            </p>
+
+            <p>
+                After successful scan this coupon
+                becomes USED.
+            </p>
+
+        </div>
+
+    </div>
+
+
+    <script>
+
+    const expiry =
+        new Date(
+            "{expires_iso}"
+        ).getTime();
+
+    const timerElement =
+        document.getElementById("timer");
+
+    const interval =
+        setInterval(function() {{
+
+            const now =
+                new Date().getTime();
+
+            const distance =
+                expiry - now;
+
+            if (distance <= 0) {{
+
+                clearInterval(interval);
+
+                timerElement.innerText =
+                    "EXPIRED";
+
+                timerElement.style.color =
+                    "red";
+
+                return;
+
+            }}
+
+            const minutes =
+                Math.floor(
+                    distance / 60000
+                );
+
+            const seconds =
+                Math.floor(
+                    (distance % 60000) / 1000
+                );
+
+            timerElement.innerText =
+                String(minutes).padStart(
+                    2, "0"
+                )
+                + ":"
+                +
+                String(seconds).padStart(
+                    2, "0"
+                );
+
+        }}, 1000);
+
+    </script>
+
+    </body>
+    </html>
+    """
+
+    return render_template_string(html)
+
+
+# =========================================================
+# STUDENT LOGOUT
+# =========================================================
+
+@app.route("/student/logout")
+def student_logout():
+
+    session.pop("student_uid", None)
+
+    return redirect(
+        url_for("student_home")
+    )
+
+
+# =========================================================
+# ADMIN SCANNER
+# =========================================================
+
+# =========================================================
+# ADMIN QR SCANNER
+# =========================================================
+
+@app.route("/admin/scanner")
+def admin_scanner():
+
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+
+    <head>
+
+        <title>Mess QR Scanner</title>
+
+        {CSS}
+
+        <script src="https://unpkg.com/html5-qrcode"></script>
+
+        <style>
+            #reader {{
+                width: 100%;
+                max-width: 600px;
+                margin: 20px auto;
+            }}
+
+            #result {{
+                margin-top: 20px;
+            }}
+
+            .big-photo {{
+                width: 150px;
+                height: 150px;
+                object-fit: cover;
+                border-radius: 15px;
+                display: block;
+                margin: 15px auto;
+            }}
+        </style>
+
+    </head>
+
+    <body>
+
+    <div class="container">
+
+        <div class="nav">
+
+            <a class="btn"
+               href="/admin/dashboard">
+                Dashboard
+            </a>
+
+            <a class="btn gray"
+               href="/admin/records">
+                📊 Records
+            </a>
+
+            <a class="btn red"
+               href="/admin/logout">
+                Logout
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h1>📷 Mess QR Scanner</h1>
+
+            <p>
+                Allow camera permission and scan the student's coupon QR.
+            </p>
+
+            <div id="reader"></div>
+
+            <div id="result"></div>
+
+        </div>
+
+    </div>
+
+    <script>
+
+    let processing = false;
+
+    async function verifyCoupon(token) {{
+
+        if (processing) {{
+            return;
+        }}
+
+        processing = true;
+
+        try {{
+
+            const response = await fetch(
+                "/admin/verify-coupon",
+                {{
+                    method: "POST",
+                    headers: {{
+                        "Content-Type": "application/json"
+                    }},
+                    body: JSON.stringify({{
+                        token: token
+                    }})
+                }}
+            );
+
+            const data = await response.json();
+
+            if (data.success) {{
+
+                const photo =
+                    data.photo
+                    ?
+                    "<img class='big-photo' src='"
+                    + data.photo
+                    + "'>"
+                    :
+                    "";
+
+                document.getElementById(
+                    "result"
+                ).innerHTML =
+
+                    "<div class='message success'>"
+
+                    + "<h2>✅ COUPON VALID</h2>"
+
+                    + photo
+
+                    + "<h2>"
+                    + data.name
+                    + "</h2>"
+
+                    + "<p>Roll: "
+                    + data.roll
+                    + "</p>"
+
+                    + "<p>Branch: "
+                    + data.branch
+                    + "</p>"
+
+                    + "<p>Room: "
+                    + data.room
+                    + "</p>"
+
+                    + "<p>Meal: <b>"
+                    + data.meal
+                    + "</b></p>"
+
+                    + "<p>Coupon is now USED.</p>"
+
+                    + "</div>";
+
+            }} else {{
+
+                document.getElementById(
+                    "result"
+                ).innerHTML =
+
+                    "<div class='message error'>"
+
+                    + "<h2>❌ COUPON REJECTED</h2>"
+
+                    + "<p>"
+                    + data.message
+                    + "</p>"
+
+                    + "</div>";
+            }}
+
+        }} catch (error) {{
+
+            document.getElementById(
+                "result"
+            ).innerHTML =
+
+                "<div class='message error'>"
+
+                + "<h2>❌ Scanner Error</h2>"
+
+                + "<p>"
+                + error
+                + "</p>"
+
+                + "</div>";
+        }}
+
+        setTimeout(
+            function() {{
+                processing = false;
+            }},
+            2000
+        );
+
+    }}
+
+    function scanSuccess(
+        decodedText,
+        decodedResult
+    ) {{
+
+        verifyCoupon(decodedText);
+
+    }}
+
+    function scanFailure(error) {{
+
+        // Ignore scan errors
+
+    }}
+
+    const scanner =
+        new Html5QrcodeScanner(
+            "reader",
+            {{
+                fps: 10,
+                qrbox: {{
+                    width: 250,
+                    height: 250
+                }},
+                rememberLastUsedCamera: true
+            }},
+            false
+        );
+
+    scanner.render(
+        scanSuccess,
+        scanFailure
+    );
+
+    </script>
+
+    </body>
+    </html>
+    """
+
+    return html
+    # =====================================================
+    # SAVE SUCCESSFUL SCAN TO GOOGLE SHEET
+    # =====================================================
+
+    try:
+
+        GOOGLE_SHEET_URL = (
+            "https://script.google.com/macros/s/"
+            "AKfycbzRjb3Xh_O95l9N18VJKhUVs6-4qb99Ybr60zmyxIp-amMOtBPnFzArpyJo2tlyl1zE/exec"
+        )
+
+        sheet_data = {
+            "date": current_time().strftime("%d-%m-%Y"),
+            "time": current_time().strftime("%H:%M:%S"),
+            "name": student["name"],
+            "roll": student["roll_number"],
+            "branch": student["branch"],
+            "room": student["hostel_room"],
+            "meal": coupon["meal"],
+            "status": "USED"
+        }
+
+        response = requests.post(
+            GOOGLE_SHEET_URL,
+            json=sheet_data,
+            timeout=10
+        )
+
+        print(
+            "Google Sheet:",
+            response.text
+        )
+
+    except Exception as e:
+
+        print(
+            "Google Sheet Error:",
+            e
+        )
+
+    conn.close()
+
+    photo_url = ""
+
+    if student["photo_filename"]:
+        photo_url = (
+            "/student-photo/"
+            + str(student["id"])
+        )
+
+    return jsonify({
+        "success": True,
+        "name": student["name"],
+        "roll": student["roll_number"],
+        "branch": student["branch"],
+        "room": student["hostel_room"],
+        "meal": coupon["meal"],
+        "photo": photo_url
+    })
+
+# =========================================================
+# ADMIN RECORDS
+# =========================================================
+
+@app.route("/admin/records")
+def admin_records():
+
+    if not admin_required():
+        return redirect(
+            url_for("admin_login")
+        )
+
+    conn = db()
+
+    records = conn.execute("""
+        SELECT
+            coupons.*,
+            students.name,
+            students.roll_number,
+            students.branch,
+            students.hostel_room
+        FROM coupons
+        LEFT JOIN students
+        ON coupons.student_uid =
+           students.student_uid
+        ORDER BY coupons.id DESC
+    """).fetchall()
+
+    conn.close()
+
+    rows = ""
+
+    for record in records:
+
+        if record["status"] == "USED":
+
+            badge = (
+                '<span class="badge used-badge">'
+                'USED</span>'
+            )
+
+        elif record["status"] == "EXPIRED":
+
+            badge = (
+                '<span class="badge expired-badge">'
+                'EXPIRED</span>'
+            )
+
+        else:
+
+            badge = (
+                '<span class="badge active-badge">'
+                'ACTIVE</span>'
+            )
+
+        rows += f"""
+        <tr>
+
+            <td>{record["name"] or "-"}</td>
+
+            <td>{record["roll_number"] or "-"}</td>
+
+            <td>{record["meal"]}</td>
+
+            <td>{record["generated_at"]}</td>
+
+            <td>{record["expires_at"]}</td>
+
+            <td>{record["used_at"] or "-"}</td>
+
+            <td>{badge}</td>
+
+        </tr>
+        """
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+
+    <head>
+
+        <title>Records</title>
+
+        {CSS}
+
+    </head>
+
+    <body>
+
+    <div class="container">
+
+        <div class="nav">
+
+            <a
+                class="btn"
+                href="/admin/dashboard"
+            >
+                Dashboard
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h1>📊 Mess Records</h1>
+
+            <div style="overflow-x:auto;">
+
+                <table>
+
+                    <tr>
+                        <th>Name</th>
+                        <th>Roll</th>
+                        <th>Meal</th>
+                        <th>Generated</th>
+                        <th>Expires</th>
+                        <th>Used At</th>
+                        <th>Status</th>
+                    </tr>
+
+                    {rows}
+
+                </table>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    </body>
+
+    </html>
+    """
+
+    return html
+
+
+# =========================================================
+# RUN
+# =========================================================
+
+if __name__ == "__main__":
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )
