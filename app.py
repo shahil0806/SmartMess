@@ -40,6 +40,13 @@ app.config.update(
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "shahil123")
 INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
+BRANCHES = [
+    "AI & ML",
+    "Civil (Construction Technology)",
+    "Electronics (Robotics)",
+    "Mechanical (CAD/CAM)",
+]
+HOSTEL_BLOCKS = ["BH-1", "BH-2"]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "smart_mess.db"))
@@ -753,6 +760,8 @@ def admin_dashboard():
 
     boys_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND gender = 'BOY'").fetchone()["c"]
     girls_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND gender = 'GIRL'").fetchone()["c"]
+    bh1_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND hostel_block = 'BH-1'").fetchone()["c"]
+    bh2_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND hostel_block = 'BH-2'").fetchone()["c"]
 
     breakfast = conn.execute("""
         SELECT COUNT(*) AS c
@@ -838,6 +847,9 @@ def admin_dashboard():
                 <h2>{girls_count}</h2>
             </div>
 
+            <div class="stat"><div>🏢 BH-1 Students</div><h2>{bh1_count}</h2></div>
+            <div class="stat"><div>🏢 BH-2 Students</div><h2>{bh2_count}</h2></div>
+
             <div class="stat">
                 <div>Breakfast Today</div>
                 <h2>{breakfast}</h2>
@@ -907,8 +919,9 @@ def admin_add_student():
         hostel_block = request.form.get("hostel_block", "").strip()
         photo = request.files.get("photo")
 
-        if (not name or not roll or not branch or not room or
-                gender not in ["BOY", "GIRL"] or not hostel_name):
+        if (not name or not roll or branch not in BRANCHES or not room or
+                gender not in ["BOY", "GIRL"] or not hostel_name or
+                hostel_block not in HOSTEL_BLOCKS):
 
             message = "Please fill every field."
             message_class = "message error"
@@ -1051,13 +1064,13 @@ def admin_add_student():
                 >
 
                 <label>Branch</label>
-
-                <input
-                    type="text"
-                    name="branch"
-                    placeholder="AI & ML / Electrical / etc."
-                    required
-                >
+                <select name="branch" required>
+                    <option value="">Select Branch</option>
+                    <option value="AI &amp; ML">AI &amp; ML</option>
+                    <option value="Civil (Construction Technology)">Civil (Construction Technology)</option>
+                    <option value="Electronics (Robotics)">Electronics (Robotics)</option>
+                    <option value="Mechanical (CAD/CAM)">Mechanical (CAD/CAM)</option>
+                </select>
 
                 <label>Hostel Room</label>
 
@@ -1082,7 +1095,11 @@ def admin_add_student():
                 </select>
 
                 <label>Hostel Block</label>
-                <input type="text" name="hostel_block" placeholder="Example: A Block">
+                <select name="hostel_block" required>
+                    <option value="">Select Hostel Block</option>
+                    <option value="BH-1">BH-1</option>
+                    <option value="BH-2">BH-2</option>
+                </select>
 
                 <label>Student Photo</label>
 
@@ -1122,6 +1139,8 @@ def admin_students():
     search = request.args.get("q", "").strip()
     gender_filter = request.args.get("gender", "").strip().upper()
     hostel_filter = request.args.get("hostel", "").strip()
+    branch_filter = request.args.get("branch", "").strip()
+    block_filter = request.args.get("block", "").strip()
     where, params = ["1=1"], []
     if search:
         where.append("(name LIKE ? OR roll_number LIKE ? OR branch LIKE ?)")
@@ -1133,6 +1152,12 @@ def admin_students():
     if hostel_filter:
         where.append("hostel_name = ?")
         params.append(hostel_filter)
+    if branch_filter in BRANCHES:
+        where.append("branch = ?")
+        params.append(branch_filter)
+    if block_filter in HOSTEL_BLOCKS:
+        where.append("hostel_block = ?")
+        params.append(block_filter)
 
     conn = db()
     students = conn.execute(
@@ -1216,6 +1241,8 @@ def admin_students():
               <div><label>Search</label><input name="q" value="{escape(search)}" placeholder="Name / Registration No. / Branch"></div>
               <div><label>Gender</label><select name="gender"><option value="">All</option><option value="BOY" {'selected' if gender_filter == 'BOY' else ''}>Boys</option><option value="GIRL" {'selected' if gender_filter == 'GIRL' else ''}>Girls</option></select></div>
               <div><label>Hostel</label><select name="hostel"><option value="">All</option><option value="Boys Hostel" {'selected' if hostel_filter == 'Boys Hostel' else ''}>Boys Hostel</option><option value="Girls Hostel" {'selected' if hostel_filter == 'Girls Hostel' else ''}>Girls Hostel</option></select></div>
+              <div><label>Branch</label><select name="branch"><option value="">All Branches</option>{''.join(f'<option value="{escape(branch)}" {"selected" if branch_filter == branch else ""}>{escape(branch)}</option>' for branch in BRANCHES)}</select></div>
+              <div><label>Block</label><select name="block"><option value="">All Blocks</option>{''.join(f'<option value="{block}" {"selected" if block_filter == block else ""}>{block}</option>' for block in HOSTEL_BLOCKS)}</select></div>
               <div><button class="btn blue" type="submit">Apply Filter</button> <a class="btn gray" href="/admin/students">Clear</a></div>
             </form>
 
@@ -1274,7 +1301,9 @@ def admin_edit_student(student_id):
         hostel_name = request.form.get("hostel_name", "").strip()
         hostel_block = request.form.get("hostel_block", "").strip()
         photo = request.files.get("photo")
-        if not name or not registration or not branch or not room or gender not in ["BOY", "GIRL"] or not hostel_name:
+        if (not name or not registration or branch not in BRANCHES or not room or
+                gender not in ["BOY", "GIRL"] or not hostel_name or
+                hostel_block not in HOSTEL_BLOCKS):
             message = "Please fill all required fields."
         else:
             duplicate = conn.execute("SELECT id FROM students WHERE roll_number = ? AND id != ?", (registration, student_id)).fetchone()
@@ -1305,10 +1334,14 @@ def admin_edit_student(student_id):
     <form method="POST" enctype="multipart/form-data">
       <label>Name</label><input name="name" value="{escape(student['name'])}" required>
       <label>Registration Number</label><input name="registration_number" value="{escape(student['roll_number'])}" required>
-      <label>Branch</label><input name="branch" value="{escape(student['branch'])}" required>
+      <label>Branch</label><select name="branch" required>
+        {''.join(f'<option value="{escape(branch)}" {"selected" if student["branch"] == branch else ""}>{escape(branch)}</option>' for branch in BRANCHES)}
+      </select>
       <label>Gender</label><select name="gender" required><option value="BOY" {'selected' if student['gender']=='BOY' else ''}>Boy</option><option value="GIRL" {'selected' if student['gender']=='GIRL' else ''}>Girl</option></select>
       <label>Hostel</label><select name="hostel_name" required><option value="Boys Hostel" {'selected' if student['hostel_name']=='Boys Hostel' else ''}>Boys Hostel</option><option value="Girls Hostel" {'selected' if student['hostel_name']=='Girls Hostel' else ''}>Girls Hostel</option></select>
-      <label>Hostel Block</label><input name="hostel_block" value="{escape(student['hostel_block'] or '')}">
+      <label>Hostel Block</label><select name="hostel_block" required>
+        {''.join(f'<option value="{block}" {"selected" if student["hostel_block"] == block else ""}>{block}</option>' for block in HOSTEL_BLOCKS)}
+      </select>
       <label>Room Number</label><input name="hostel_room" value="{escape(student['hostel_room'])}" required>
       <label>Change Photo (optional)</label><input type="file" name="photo" accept="image/*">
       <button class="btn green" type="submit">Save Changes</button>

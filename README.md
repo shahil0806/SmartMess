@@ -11,6 +11,8 @@ Premium hostel mess coupon and attendance system built with Flask, SQLite and se
 - Student search and Gender/Hostel filters
 - Student detail/photo editing
 - Active/Inactive student control
+- Fixed branch dropdown: AI & ML, Civil (Construction Technology), Electronics (Robotics), Mechanical (CAD/CAM)
+- Fixed hostel-block dropdown: BH-1 and BH-2, with dashboard counts and filters
 
 Existing student records are preserved during the upgrade. Open each old student from Admin → Students → Edit and fill Gender, Hostel and Block once.
 
