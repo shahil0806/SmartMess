@@ -1067,6 +1067,23 @@ def admin_add_student():
                     required
                 >
 
+                <label>Gender</label>
+                <select name="gender" required>
+                    <option value="">Select Boy/Girl</option>
+                    <option value="BOY">Boy</option>
+                    <option value="GIRL">Girl</option>
+                </select>
+
+                <label>Hostel</label>
+                <select name="hostel_name" required>
+                    <option value="">Select Hostel</option>
+                    <option value="Boys Hostel">Boys Hostel</option>
+                    <option value="Girls Hostel">Girls Hostel</option>
+                </select>
+
+                <label>Hostel Block</label>
+                <input type="text" name="hostel_block" placeholder="Example: A Block">
+
                 <label>Student Photo</label>
 
                 <input
@@ -1383,23 +1400,6 @@ def student_home():
                     placeholder="Enter your Registration Number"
                     required
                 >
-
-                <label>Gender</label>
-                <select name="gender" required>
-                    <option value="">Select Boy/Girl</option>
-                    <option value="BOY">Boy</option>
-                    <option value="GIRL">Girl</option>
-                </select>
-
-                <label>Hostel</label>
-                <select name="hostel_name" required>
-                    <option value="">Select Hostel</option>
-                    <option value="Boys Hostel">Boys Hostel</option>
-                    <option value="Girls Hostel">Girls Hostel</option>
-                </select>
-
-                <label>Hostel Block</label>
-                <input type="text" name="hostel_block" placeholder="Example: A Block">
 
                 <button class="btn blue" type="submit">
                     Verify Student
