@@ -2,6 +2,18 @@
 
 Premium hostel mess coupon and attendance system built with Flask, SQLite and secure one-time QR coupons.
 
+## Phase 1 features
+
+- Registration Number based student verification
+- Boy/Girl and Boys Hostel/Girls Hostel classification
+- Hostel block and room details
+- Separate Boys/Girls dashboard counts
+- Student search and Gender/Hostel filters
+- Student detail/photo editing
+- Active/Inactive student control
+
+Existing student records are preserved during the upgrade. Open each old student from Admin → Students → Edit and fill Gender, Hostel and Block once.
+
 ## Main links
 
 - Student panel: `/student`

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 import qrcode
 import requests
+from markupsafe import escape
 
 GOOGLE_SHEET_URL = os.environ.get("GOOGLE_SHEET_URL", "")
 # =========================================================
@@ -73,6 +74,15 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Phase 1 migration: preserve all existing students while adding hostel details.
+    student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)")}
+    if "gender" not in student_columns:
+        conn.execute("ALTER TABLE students ADD COLUMN gender TEXT DEFAULT 'NOT SET'")
+    if "hostel_name" not in student_columns:
+        conn.execute("ALTER TABLE students ADD COLUMN hostel_name TEXT DEFAULT 'NOT SET'")
+    if "hostel_block" not in student_columns:
+        conn.execute("ALTER TABLE students ADD COLUMN hostel_block TEXT DEFAULT ''")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS coupons (
@@ -670,6 +680,9 @@ def verify_coupon():
                 "roll": student["roll_number"],
                 "branch": student["branch"],
                 "room": student["hostel_room"],
+                "gender": student["gender"],
+                "hostel": student["hostel_name"],
+                "block": student["hostel_block"],
                 "meal": coupon["meal"],
                 "status": "USED"
             },
@@ -713,6 +726,9 @@ def verify_coupon():
         "roll": student["roll_number"],
         "branch": student["branch"],
         "room": student["hostel_room"],
+        "gender": student["gender"],
+        "hostel": student["hostel_name"],
+        "block": student["hostel_block"],
         "meal": coupon["meal"],
         "photo": photo_url
     })# =========================================================
@@ -734,6 +750,9 @@ def admin_dashboard():
         FROM students
         WHERE active = 1
     """).fetchone()["c"]
+
+    boys_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND gender = 'BOY'").fetchone()["c"]
+    girls_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND gender = 'GIRL'").fetchone()["c"]
 
     breakfast = conn.execute("""
         SELECT COUNT(*) AS c
@@ -810,6 +829,16 @@ def admin_dashboard():
             </div>
 
             <div class="stat">
+                <div>👦 Boys</div>
+                <h2>{boys_count}</h2>
+            </div>
+
+            <div class="stat">
+                <div>👧 Girls</div>
+                <h2>{girls_count}</h2>
+            </div>
+
+            <div class="stat">
                 <div>Breakfast Today</div>
                 <h2>{breakfast}</h2>
             </div>
@@ -873,9 +902,13 @@ def admin_add_student():
         roll = request.form.get("roll_number", "").strip()
         branch = request.form.get("branch", "").strip()
         room = request.form.get("hostel_room", "").strip()
+        gender = request.form.get("gender", "").strip().upper()
+        hostel_name = request.form.get("hostel_name", "").strip()
+        hostel_block = request.form.get("hostel_block", "").strip()
         photo = request.files.get("photo")
 
-        if not name or not roll or not branch or not room:
+        if (not name or not roll or not branch or not room or
+                gender not in ["BOY", "GIRL"] or not hostel_name):
 
             message = "Please fill every field."
             message_class = "message error"
@@ -899,7 +932,7 @@ def admin_add_student():
 
                 conn.close()
 
-                message = "This roll number is already registered."
+                message = "This Registration Number is already registered."
                 message_class = "message error"
 
             else:
@@ -936,17 +969,23 @@ def admin_add_student():
                             roll_number,
                             branch,
                             hostel_room,
+                            gender,
+                            hostel_name,
+                            hostel_block,
                             photo_filename,
                             active,
                             created_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """, (
                         uid,
                         name,
                         roll,
                         branch,
                         room,
+                        gender,
+                        hostel_name,
+                        hostel_block,
                         filename,
                         current_time().strftime(
                             "%Y-%m-%d %H:%M:%S"
@@ -1003,7 +1042,7 @@ def admin_add_student():
                     required
                 >
 
-                <label>Roll Number</label>
+                <label>Registration Number</label>
 
                 <input
                     type="text"
@@ -1063,13 +1102,26 @@ def admin_students():
     if not admin_required():
         return redirect(url_for("admin_login"))
 
-    conn = db()
+    search = request.args.get("q", "").strip()
+    gender_filter = request.args.get("gender", "").strip().upper()
+    hostel_filter = request.args.get("hostel", "").strip()
+    where, params = ["1=1"], []
+    if search:
+        where.append("(name LIKE ? OR roll_number LIKE ? OR branch LIKE ?)")
+        term = f"%{search}%"
+        params.extend([term, term, term])
+    if gender_filter in ["BOY", "GIRL"]:
+        where.append("gender = ?")
+        params.append(gender_filter)
+    if hostel_filter:
+        where.append("hostel_name = ?")
+        params.append(hostel_filter)
 
-    students = conn.execute("""
-        SELECT *
-        FROM students
-        ORDER BY name
-    """).fetchall()
+    conn = db()
+    students = conn.execute(
+        "SELECT * FROM students WHERE " + " AND ".join(where) + " ORDER BY name",
+        params
+    ).fetchall()
 
     conn.close()
 
@@ -1099,12 +1151,18 @@ def admin_students():
         <tr>
 
             <td>{photo}</td>
-            <td>{student["name"]}</td>
-            <td>{student["roll_number"]}</td>
-            <td>{student["branch"]}</td>
-            <td>{student["hostel_room"]}</td>
+            <td>{escape(student["name"])}</td>
+            <td>{escape(student["roll_number"])}</td>
+            <td>{escape(student["gender"] or "NOT SET")}</td>
+            <td>{escape(student["branch"])}</td>
+            <td>{escape(student["hostel_name"] or "NOT SET")}<br><small>{escape(student["hostel_block"] or "")}</small></td>
+            <td>{escape(student["hostel_room"])}</td>
             <td>{student["student_uid"]}</td>
             <td>{status}</td>
+            <td><a class="btn blue" href="/admin/student/{student['id']}/edit">Edit</a>
+                <form method="POST" action="/admin/student/{student['id']}/toggle" style="display:inline">
+                  <button class="btn {'red' if student['active'] else 'green'}" type="submit">{'Inactive' if student['active'] else 'Active'}</button>
+                </form></td>
 
         </tr>
         """
@@ -1137,6 +1195,13 @@ def admin_students():
 
             <h1>👨‍🎓 Hostel Students</h1>
 
+            <form method="GET" class="grid" style="align-items:end">
+              <div><label>Search</label><input name="q" value="{escape(search)}" placeholder="Name / Registration No. / Branch"></div>
+              <div><label>Gender</label><select name="gender"><option value="">All</option><option value="BOY" {'selected' if gender_filter == 'BOY' else ''}>Boys</option><option value="GIRL" {'selected' if gender_filter == 'GIRL' else ''}>Girls</option></select></div>
+              <div><label>Hostel</label><select name="hostel"><option value="">All</option><option value="Boys Hostel" {'selected' if hostel_filter == 'Boys Hostel' else ''}>Boys Hostel</option><option value="Girls Hostel" {'selected' if hostel_filter == 'Girls Hostel' else ''}>Girls Hostel</option></select></div>
+              <div><button class="btn blue" type="submit">Apply Filter</button> <a class="btn gray" href="/admin/students">Clear</a></div>
+            </form>
+
             <div style="overflow-x:auto;">
 
                 <table>
@@ -1144,11 +1209,14 @@ def admin_students():
                     <tr>
                         <th>Photo</th>
                         <th>Name</th>
-                        <th>Roll</th>
+                        <th>Registration No.</th>
+                        <th>Gender</th>
                         <th>Branch</th>
+                        <th>Hostel/Block</th>
                         <th>Room</th>
                         <th>Student ID</th>
                         <th>Status</th>
+                        <th>Action</th>
                     </tr>
 
                     {rows}
@@ -1166,6 +1234,80 @@ def admin_students():
     """
 
     return html
+
+
+@app.route("/admin/student/<int:student_id>/edit", methods=["GET", "POST"])
+def admin_edit_student(student_id):
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+
+    conn = db()
+    student = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not student:
+        conn.close()
+        return "Student not found", 404
+
+    message = ""
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        registration = request.form.get("registration_number", "").strip()
+        branch = request.form.get("branch", "").strip()
+        room = request.form.get("hostel_room", "").strip()
+        gender = request.form.get("gender", "").strip().upper()
+        hostel_name = request.form.get("hostel_name", "").strip()
+        hostel_block = request.form.get("hostel_block", "").strip()
+        photo = request.files.get("photo")
+        if not name or not registration or not branch or not room or gender not in ["BOY", "GIRL"] or not hostel_name:
+            message = "Please fill all required fields."
+        else:
+            duplicate = conn.execute("SELECT id FROM students WHERE roll_number = ? AND id != ?", (registration, student_id)).fetchone()
+            if duplicate:
+                message = "Registration Number already exists."
+            else:
+                photo_filename = student["photo_filename"]
+                if photo and photo.filename:
+                    ext = os.path.splitext(photo.filename)[1].lower()
+                    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+                        message = "Use JPG, JPEG, PNG or WEBP photo."
+                    else:
+                        photo_filename = student["student_uid"] + ext
+                        photo.save(os.path.join(PHOTO_DIR, photo_filename))
+                if not message:
+                    conn.execute("""UPDATE students SET name=?, roll_number=?, branch=?, hostel_room=?,
+                                 gender=?, hostel_name=?, hostel_block=?, photo_filename=? WHERE id=?""",
+                                 (name, registration, branch, room, gender, hostel_name, hostel_block, photo_filename, student_id))
+                    conn.commit()
+                    conn.close()
+                    return redirect(url_for("admin_students"))
+
+    student = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    conn.close()
+    html = f"""<!DOCTYPE html><html><head><title>Edit Student</title>{CSS}</head><body><div class="container">
+    <div class="nav"><a class="btn" href="/admin/students">Back to Students</a></div>
+    <div class="card"><h1>✏️ Edit Student</h1>{f'<div class="message error">{escape(message)}</div>' if message else ''}
+    <form method="POST" enctype="multipart/form-data">
+      <label>Name</label><input name="name" value="{escape(student['name'])}" required>
+      <label>Registration Number</label><input name="registration_number" value="{escape(student['roll_number'])}" required>
+      <label>Branch</label><input name="branch" value="{escape(student['branch'])}" required>
+      <label>Gender</label><select name="gender" required><option value="BOY" {'selected' if student['gender']=='BOY' else ''}>Boy</option><option value="GIRL" {'selected' if student['gender']=='GIRL' else ''}>Girl</option></select>
+      <label>Hostel</label><select name="hostel_name" required><option value="Boys Hostel" {'selected' if student['hostel_name']=='Boys Hostel' else ''}>Boys Hostel</option><option value="Girls Hostel" {'selected' if student['hostel_name']=='Girls Hostel' else ''}>Girls Hostel</option></select>
+      <label>Hostel Block</label><input name="hostel_block" value="{escape(student['hostel_block'] or '')}">
+      <label>Room Number</label><input name="hostel_room" value="{escape(student['hostel_room'])}" required>
+      <label>Change Photo (optional)</label><input type="file" name="photo" accept="image/*">
+      <button class="btn green" type="submit">Save Changes</button>
+    </form></div></div></body></html>"""
+    return html
+
+
+@app.route("/admin/student/<int:student_id>/toggle", methods=["POST"])
+def admin_toggle_student(student_id):
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+    conn = db()
+    conn.execute("UPDATE students SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE id = ?", (student_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for("admin_students"))
 
 
 # =========================================================
@@ -1202,7 +1344,7 @@ def student_photo(student_id):
 def student_home():
 
     # Student session is not required permanently.
-    # Roll number verification is done before coupon generation.
+    # Registration number verification is done before coupon generation.
 
     html = f"""
     <!DOCTYPE html>
@@ -1226,21 +1368,38 @@ def student_home():
                 <h1>🍽️ Smart Mess Student Panel</h1>
 
                 <p>
-                    Hostel student apna Roll Number enter kare.
+                    Hostel student apna Registration Number enter kare.
                 </p>
 
             </div>
 
             <form method="POST" action="/student/verify">
 
-                <label>Roll Number</label>
+                <label>Registration Number</label>
 
                 <input
                     type="text"
                     name="roll_number"
-                    placeholder="Enter your roll number"
+                    placeholder="Enter your Registration Number"
                     required
                 >
+
+                <label>Gender</label>
+                <select name="gender" required>
+                    <option value="">Select Boy/Girl</option>
+                    <option value="BOY">Boy</option>
+                    <option value="GIRL">Girl</option>
+                </select>
+
+                <label>Hostel</label>
+                <select name="hostel_name" required>
+                    <option value="">Select Hostel</option>
+                    <option value="Boys Hostel">Boys Hostel</option>
+                    <option value="Girls Hostel">Girls Hostel</option>
+                </select>
+
+                <label>Hostel Block</label>
+                <input type="text" name="hostel_block" placeholder="Example: A Block">
 
                 <button class="btn blue" type="submit">
                     Verify Student
@@ -1300,9 +1459,7 @@ def student_verify():
                 <h1>❌ Student Not Found</h1>
 
                 <div class="message error">
-                    This student is not registered as an
-                    active hostel student.
-                    Coupon cannot be generated.
+                    This student is not registered as an active hostel student.
                 </div>
 
                 <a class="btn" href="/student">
@@ -1390,7 +1547,7 @@ def student_meals():
             </h1>
 
             <p>
-                Roll: <b>{student["roll_number"]}</b>
+                Registration No.: <b>{student["roll_number"]}</b>
             </p>
 
             <p>
@@ -1400,6 +1557,9 @@ def student_meals():
             <p>
                 Room: <b>{student["hostel_room"]}</b>
             </p>
+
+            <p>Gender: <b>{student["gender"] or "NOT SET"}</b></p>
+            <p>Hostel: <b>{student["hostel_name"] or "NOT SET"} {student["hostel_block"] or ""}</b></p>
 
         </div>
 
@@ -1729,7 +1889,7 @@ def render_coupon(student, coupon):
             </h2>
 
             <p>
-                Roll Number:
+                Registration Number:
                 <b>{student["roll_number"]}</b>
             </p>
 
@@ -1742,6 +1902,9 @@ def render_coupon(student, coupon):
                 Hostel Room:
                 <b>{student["hostel_room"]}</b>
             </p>
+
+            <p>Gender: <b>{student["gender"] or "NOT SET"}</b></p>
+            <p>Hostel: <b>{student["hostel_name"] or "NOT SET"} {student["hostel_block"] or ""}</b></p>
 
             <h2>
                 🍽️ {meal_name}
@@ -1998,7 +2161,7 @@ def admin_scanner():
                     + data.name
                     + "</h2>"
 
-                    + "<p>Roll: "
+                    + "<p>Registration No.: "
                     + data.roll
                     + "</p>"
 
@@ -2009,6 +2172,9 @@ def admin_scanner():
                     + "<p>Room: "
                     + data.room
                     + "</p>"
+
+                    + "<p>Gender: " + (data.gender || "NOT SET") + "</p>"
+                    + "<p>Hostel: " + (data.hostel || "NOT SET") + " " + (data.block || "") + "</p>"
 
                     + "<p>Meal: <b>"
                     + data.meal
@@ -2274,7 +2440,7 @@ def admin_records():
 
                     <tr>
                         <th>Name</th>
-                        <th>Roll</th>
+                        <th>Registration No.</th>
                         <th>Meal</th>
                         <th>Generated</th>
                         <th>Expires</th>
