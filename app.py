@@ -14,26 +14,35 @@ import os
 import secrets
 import string
 import base64
+import hmac
 from io import BytesIO
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import qrcode
 import requests
 
-GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzRjb3Xh_O95l9N18VJKhUVs6-4qb99Ybr60zmyxIp-amMOtBPnFzArpyJo2tlyl1zE/exec"
+GOOGLE_SHEET_URL = os.environ.get("GOOGLE_SHEET_URL", "")
 # =========================================================
 # BASIC SETTINGS
 # =========================================================
 
 app = Flask(__name__)
 
-app.secret_key = "SMART_MESS_CHANGE_THIS_SECRET_2026"
+app.secret_key = os.environ.get("SECRET_KEY", "smartmess-local-development-key")
+app.config.update(
+    MAX_CONTENT_LENGTH=5 * 1024 * 1024,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "0") == "1",
+)
 
-ADMIN_PASSWORD = "shahil123"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "shahil123")
+INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "smart_mess.db")
-PHOTO_DIR = os.path.join(BASE_DIR, "photos")
+DB_FILE = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "smart_mess.db"))
+PHOTO_DIR = os.environ.get("PHOTO_DIR", os.path.join(BASE_DIR, "photos"))
 
 os.makedirs(PHOTO_DIR, exist_ok=True)
 
@@ -90,7 +99,8 @@ init_db()
 # =========================================================
 
 def current_time():
-    return datetime.now()
+    # Store India-local timestamps so the meal date remains correct on Render.
+    return datetime.now(INDIA_TIMEZONE).replace(tzinfo=None)
 
 
 def make_student_uid():
@@ -106,6 +116,14 @@ def make_coupon_token():
 
 def admin_required():
     return session.get("admin") is True
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 
 def image_data_uri(filename):
@@ -363,6 +381,48 @@ td {
         font-size: 12px;
     }
 }
+
+/* Premium SmartMess theme */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root { --navy:#081b33; --blue:#2563eb; --cyan:#06b6d4; --ink:#10233f; --muted:#64748b; }
+body { min-height:100vh; color:var(--ink); font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
+ background:radial-gradient(circle at 8% 0%,rgba(37,99,235,.16),transparent 28rem),radial-gradient(circle at 95% 8%,rgba(6,182,212,.13),transparent 25rem),#f4f7fb; }
+body:before { content:""; display:block; height:5px; background:linear-gradient(90deg,var(--blue),var(--cyan)); }
+.container { width:min(94%,1180px); margin:32px auto; }
+h1,h2 { color:var(--navy); letter-spacing:-.035em; }
+p { line-height:1.65; color:var(--muted); }
+.card,.stat { background:rgba(255,255,255,.94); border:1px solid rgba(148,163,184,.18); box-shadow:0 18px 55px rgba(15,35,65,.09); }
+.card { padding:clamp(22px,4vw,34px); border-radius:24px; }
+.nav { gap:10px; padding:10px; background:var(--navy); border-radius:18px; box-shadow:0 16px 35px rgba(8,27,51,.18); }
+.btn,.meal-buttons button { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:12px 18px; font:600 14px Inter,sans-serif;
+ background:linear-gradient(135deg,#172a46,#0b1d35); border-radius:12px; transition:transform .2s,box-shadow .2s,filter .2s; }
+.btn:hover,.meal-buttons button:hover { transform:translateY(-2px); box-shadow:0 10px 24px rgba(15,35,65,.2); filter:brightness(1.08); }
+.green { background:linear-gradient(135deg,#16a34a,#059669); }
+.blue { background:linear-gradient(135deg,#2563eb,#0891b2); }
+.red { background:linear-gradient(135deg,#ef4444,#be123c); }
+.gray { background:linear-gradient(135deg,#64748b,#475569); }
+label { display:block; margin-top:5px; font-weight:650; font-size:14px; }
+input,select { padding:14px 15px; color:var(--ink); background:#f8fafc; border:1px solid #dbe3ee; border-radius:12px; outline:none; font:500 15px Inter,sans-serif; transition:.2s; }
+input:focus,select:focus { background:#fff; border-color:#60a5fa; box-shadow:0 0 0 4px rgba(37,99,235,.1); }
+.grid { gap:17px; margin-bottom:22px; }
+.stat { position:relative; overflow:hidden; padding:23px; border-radius:20px; color:var(--muted); }
+.stat:after { content:""; position:absolute; right:-22px; bottom:-28px; width:85px; height:85px; border-radius:50%; background:rgba(37,99,235,.10); }
+.stat h2 { font-size:34px; font-weight:800; color:var(--navy); }
+.message { border-left:4px solid #3b82f6; }
+.success { background:#ecfdf5; border-color:#22c55e; }
+.error { background:#fff1f2; border-color:#f43f5e; }
+.photo,.big-photo { border:4px solid #fff; box-shadow:0 8px 24px rgba(15,35,65,.16); }
+.photo { border-radius:17px; }
+.big-photo { border-radius:28px; }
+.qr { padding:12px; border-radius:22px; background:#fff; box-shadow:0 15px 40px rgba(15,35,65,.13); }
+.countdown { display:inline-block; min-width:130px; padding:9px 16px; color:#1d4ed8; background:#eff6ff; border-radius:14px; }
+table { border-collapse:separate; border-spacing:0; }
+th { color:#475569; background:#f8fafc; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+tr:hover td { background:#f8fbff; }
+.badge { font-weight:800; }
+.meal-buttons form,.meal-buttons button { width:100%; }
+.meal-buttons button { min-height:74px; background:linear-gradient(145deg,#102b4f,#2563eb); }
+@media(max-width:650px) { .container{margin:18px auto}.card{border-radius:20px;padding:20px}.nav{position:sticky;top:8px;z-index:20;overflow-x:auto;flex-wrap:nowrap}.nav .btn{white-space:nowrap}h1{font-size:27px} }
 </style>
 """
 
@@ -374,6 +434,11 @@ td {
 @app.route("/")
 def root():
     return redirect(url_for("student_home"))
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "service": "SmartMess"})
 
 
 # =========================================================
@@ -392,7 +457,7 @@ def admin_login():
 
         password = request.form.get("password", "")
 
-        if password == ADMIN_PASSWORD:
+        if hmac.compare_digest(password, ADMIN_PASSWORD):
 
             session["admin"] = True
 
@@ -590,6 +655,9 @@ def verify_coupon():
     # SAVE SUCCESSFUL SCAN TO GOOGLE SHEET
     # ---------------------------------------------------------
     try:
+
+        if not GOOGLE_SHEET_URL:
+            raise ValueError("GOOGLE_SHEET_URL is not configured")
 
         now = current_time()
 
