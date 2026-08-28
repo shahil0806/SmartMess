@@ -3,3 +3,4 @@ gunicorn==26.1.0
 pillow==12.3.0
 qrcode==8.2
 requests==2.34.2
+pymongo>=4.10,<5

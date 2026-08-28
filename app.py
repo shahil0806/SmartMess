@@ -6,7 +6,8 @@ from flask import (
     session,
     render_template_string,
     jsonify,
-    send_from_directory
+    send_from_directory,
+    Response
 )
 
 import sqlite3
@@ -15,6 +16,7 @@ import secrets
 import string
 import base64
 import hmac
+import re
 from io import BytesIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -22,6 +24,16 @@ from zoneinfo import ZoneInfo
 import qrcode
 import requests
 from markupsafe import escape
+from werkzeug.security import generate_password_hash, check_password_hash
+
+try:
+    from pymongo import MongoClient, ASCENDING, ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+except ImportError:  # Local SQLite mode remains available.
+    MongoClient = None
+    ASCENDING = 1
+    ReturnDocument = None
+    DuplicateKeyError = Exception
 
 GOOGLE_SHEET_URL = os.environ.get("GOOGLE_SHEET_URL", "")
 # =========================================================
@@ -50,6 +62,9 @@ HOSTEL_BLOCKS = ["BH-1", "BH-2"]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "smart_mess.db"))
+MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
+MONGODB_DB = os.environ.get("MONGODB_DB", "smartmess").strip() or "smartmess"
+USE_MONGO = MONGODB_URI.startswith("mongodb")
 PHOTO_DIR = os.environ.get("PHOTO_DIR", os.path.join(BASE_DIR, "photos"))
 
 os.makedirs(PHOTO_DIR, exist_ok=True)
@@ -65,44 +80,77 @@ def db():
     return conn
 
 
+mongo_client = None
+mongo_database = None
+if USE_MONGO:
+    if MongoClient is None:
+        raise RuntimeError("pymongo is not installed")
+    mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
+    mongo_database = mongo_client[MONGODB_DB]
+
+
+def next_mongo_id(sequence_name):
+    result = mongo_database.counters.find_one_and_update(
+        {"_id": sequence_name}, {"$inc": {"value": 1}}, upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
+    return result["value"]
+
+
 def init_db():
+    defaults = {
+        "breakfast_open": "1", "breakfast_start": "07:00", "breakfast_end": "09:00",
+        "lunch_open": "1", "lunch_start": "12:00", "lunch_end": "14:30",
+        "dinner_open": "1", "dinner_start": "19:00", "dinner_end": "22:00",
+    }
+
+    if USE_MONGO:
+        mongo_client.admin.command("ping")
+        mongo_database.students.create_index([("student_uid", ASCENDING)], unique=True)
+        mongo_database.students.create_index([("roll_number", ASCENDING)], unique=True)
+        mongo_database.coupons.create_index([("token", ASCENDING)], unique=True)
+        mongo_database.coupons.create_index([("student_uid", ASCENDING), ("meal", ASCENDING), ("generated_at", ASCENDING)])
+        for key, value in defaults.items():
+            mongo_database.settings.update_one({"_id": key}, {"$setOnInsert": {"value": value}}, upsert=True)
+        for student in mongo_database.students.find({"$or": [{"pin_hash": {"$exists": False}}, {"pin_hash": ""}]}):
+            temporary_pin = str(student["roll_number"])[-4:].zfill(4)
+            mongo_database.students.update_one({"_id": student["_id"]}, {"$set": {"pin_hash": generate_password_hash(temporary_pin)}})
+        return
+
     conn = db()
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_uid TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            roll_number TEXT UNIQUE NOT NULL,
-            branch TEXT NOT NULL,
-            hostel_room TEXT NOT NULL,
-            photo_filename TEXT,
-            active INTEGER DEFAULT 1,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    # Phase 1 migration: preserve all existing students while adding hostel details.
-    student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)")}
-    if "gender" not in student_columns:
-        conn.execute("ALTER TABLE students ADD COLUMN gender TEXT DEFAULT 'NOT SET'")
-    if "hostel_name" not in student_columns:
-        conn.execute("ALTER TABLE students ADD COLUMN hostel_name TEXT DEFAULT 'NOT SET'")
-    if "hostel_block" not in student_columns:
-        conn.execute("ALTER TABLE students ADD COLUMN hostel_block TEXT DEFAULT ''")
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS coupons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token TEXT UNIQUE NOT NULL,
-            student_uid TEXT NOT NULL,
-            meal TEXT NOT NULL,
-            generated_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            used_at TEXT,
-            status TEXT NOT NULL DEFAULT 'ACTIVE'
-        )
-    """)
+    conn.execute("""CREATE TABLE IF NOT EXISTS students (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, student_uid TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL, roll_number TEXT UNIQUE NOT NULL, branch TEXT NOT NULL,
+        hostel_room TEXT NOT NULL, photo_filename TEXT, photo_data BLOB, photo_mime TEXT,
+        pin_hash TEXT, gender TEXT DEFAULT 'NOT SET', hostel_name TEXT DEFAULT 'NOT SET',
+        hostel_block TEXT DEFAULT '', active INTEGER DEFAULT 1, created_at TEXT NOT NULL
+    )""")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(students)")}
+    for column, definition in {
+        "gender": "TEXT DEFAULT 'NOT SET'", "hostel_name": "TEXT DEFAULT 'NOT SET'",
+        "hostel_block": "TEXT DEFAULT ''", "photo_data": "BLOB",
+        "photo_mime": "TEXT", "pin_hash": "TEXT",
+    }.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE students ADD COLUMN {column} {definition}")
+    conn.execute("""CREATE TABLE IF NOT EXISTS coupons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL,
+        student_uid TEXT NOT NULL, meal TEXT NOT NULL, generated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL, used_at TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE'
+    )""")
+    conn.execute("CREATE TABLE IF NOT EXISTS settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL)")
+    for key, value in defaults.items():
+        conn.execute("INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)", (key, value))
+    for student in conn.execute("SELECT id, roll_number FROM students WHERE pin_hash IS NULL OR pin_hash = ''"):
+        temporary_pin = str(student["roll_number"])[-4:].zfill(4)
+        conn.execute("UPDATE students SET pin_hash = ? WHERE id = ?", (generate_password_hash(temporary_pin), student["id"]))
+    for student in conn.execute("SELECT id, photo_filename FROM students WHERE photo_data IS NULL AND photo_filename IS NOT NULL"):
+        path = os.path.join(PHOTO_DIR, student["photo_filename"])
+        if os.path.exists(path):
+            ext = os.path.splitext(path)[1].lower()
+            mime = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
+            with open(path, "rb") as photo_file:
+                conn.execute("UPDATE students SET photo_data = ?, photo_mime = ? WHERE id = ?", (photo_file.read(), mime, student["id"]))
 
     conn.commit()
     conn.close()
@@ -133,6 +181,158 @@ def make_coupon_token():
 
 def admin_required():
     return session.get("admin") is True
+
+
+def row_dict(row):
+    return dict(row) if row is not None else None
+
+
+def get_setting(key, default=""):
+    if USE_MONGO:
+        item = mongo_database.settings.find_one({"_id": key})
+        return item.get("value", default) if item else default
+    conn = db()
+    row = conn.execute("SELECT setting_value FROM settings WHERE setting_key = ?", (key,)).fetchone()
+    conn.close()
+    return row["setting_value"] if row else default
+
+
+def save_settings(values):
+    if USE_MONGO:
+        for key, value in values.items():
+            mongo_database.settings.update_one({"_id": key}, {"$set": {"value": value}}, upsert=True)
+        return
+    conn = db()
+    for key, value in values.items():
+        conn.execute("INSERT OR REPLACE INTO settings (setting_key, setting_value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def meal_is_available(meal):
+    prefix = meal.lower()
+    if get_setting(prefix + "_open", "1") != "1":
+        return False, f"{meal.title()} is closed by admin."
+    now = current_time().strftime("%H:%M")
+    start = get_setting(prefix + "_start")
+    end = get_setting(prefix + "_end")
+    if start and end and not (start <= now <= end):
+        return False, f"{meal.title()} coupon time is {start} to {end}."
+    return True, ""
+
+
+def student_by_id(student_id):
+    if USE_MONGO:
+        return mongo_database.students.find_one({"id": student_id})
+    conn = db(); row = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone(); conn.close()
+    return row_dict(row)
+
+
+def student_by_roll(registration, active_only=False):
+    if USE_MONGO:
+        query = {"roll_number": registration}
+        if active_only: query["active"] = 1
+        return mongo_database.students.find_one(query)
+    conn = db(); sql = "SELECT * FROM students WHERE roll_number = ?" + (" AND active = 1" if active_only else "")
+    row = conn.execute(sql, (registration,)).fetchone(); conn.close(); return row_dict(row)
+
+
+def student_by_uid(uid, active_only=False):
+    if USE_MONGO:
+        query = {"student_uid": uid}
+        if active_only: query["active"] = 1
+        return mongo_database.students.find_one(query)
+    conn = db(); sql = "SELECT * FROM students WHERE student_uid = ?" + (" AND active = 1" if active_only else "")
+    row = conn.execute(sql, (uid,)).fetchone(); conn.close(); return row_dict(row)
+
+
+def count_students(extra=None):
+    extra = extra or {}
+    if USE_MONGO:
+        return mongo_database.students.count_documents({"active": 1, **extra})
+    where, params = ["active = 1"], []
+    for key, value in extra.items(): where.append(f"{key} = ?"); params.append(value)
+    conn = db(); count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE " + " AND ".join(where), params).fetchone()["c"]; conn.close()
+    return count
+
+
+def add_student_record(data):
+    if USE_MONGO:
+        data = dict(data); data["id"] = next_mongo_id("students")
+        mongo_database.students.insert_one(data); return data["id"]
+    columns = list(data); placeholders = ",".join("?" for _ in columns)
+    conn = db(); cursor = conn.execute(f"INSERT INTO students ({','.join(columns)}) VALUES ({placeholders})", [data[c] for c in columns]); conn.commit(); new_id = cursor.lastrowid; conn.close(); return new_id
+
+
+def update_student_record(student_id, changes):
+    if USE_MONGO:
+        return mongo_database.students.update_one({"id": student_id}, {"$set": changes}).modified_count
+    assignments = ", ".join(f"{key} = ?" for key in changes)
+    conn = db(); cur = conn.execute(f"UPDATE students SET {assignments} WHERE id = ?", [*changes.values(), student_id]); conn.commit(); count = cur.rowcount; conn.close(); return count
+
+
+def toggle_student_record(student_id):
+    student = student_by_id(student_id)
+    if student: update_student_record(student_id, {"active": 0 if student["active"] else 1})
+
+
+def list_student_records(search="", gender="", hostel="", branch="", block=""):
+    filters = {k: v for k, v in {"gender": gender, "hostel_name": hostel, "branch": branch, "hostel_block": block}.items() if v}
+    if USE_MONGO:
+        query = dict(filters)
+        if search:
+            safe = re.escape(search); query["$or"] = [{field: {"$regex": safe, "$options": "i"}} for field in ["name", "roll_number", "branch"]]
+        return list(mongo_database.students.find(query).sort("name", ASCENDING))
+    where, params = ["1=1"], []
+    if search:
+        where.append("(name LIKE ? OR roll_number LIKE ? OR branch LIKE ?)"); term = f"%{search}%"; params.extend([term, term, term])
+    for key, value in filters.items(): where.append(f"{key} = ?"); params.append(value)
+    conn = db(); rows = conn.execute("SELECT * FROM students WHERE " + " AND ".join(where) + " ORDER BY name", params).fetchall(); conn.close()
+    return [dict(row) for row in rows]
+
+
+def coupon_by_token(token):
+    if USE_MONGO: return mongo_database.coupons.find_one({"token": token})
+    conn = db(); row = conn.execute("SELECT * FROM coupons WHERE token = ?", (token,)).fetchone(); conn.close(); return row_dict(row)
+
+
+def update_coupon(coupon_id, changes, required_status=None):
+    if USE_MONGO:
+        query = {"id": coupon_id}
+        if required_status: query["status"] = required_status
+        return mongo_database.coupons.update_one(query, {"$set": changes}).modified_count
+    assignments = ", ".join(f"{key} = ?" for key in changes); params = list(changes.values()) + [coupon_id]
+    sql = f"UPDATE coupons SET {assignments} WHERE id = ?"
+    if required_status: sql += " AND status = ?"; params.append(required_status)
+    conn = db(); cur = conn.execute(sql, params); conn.commit(); count = cur.rowcount; conn.close(); return count
+
+
+def coupon_count(meal, date_prefix):
+    if USE_MONGO:
+        return mongo_database.coupons.count_documents({"meal": meal, "status": "USED", "generated_at": {"$regex": "^" + re.escape(date_prefix)}})
+    conn = db(); count = conn.execute("SELECT COUNT(*) AS c FROM coupons WHERE meal=? AND status='USED' AND substr(generated_at,1,10)=?", (meal, date_prefix)).fetchone()["c"]; conn.close(); return count
+
+
+def latest_coupon(uid, meal, date_prefix):
+    if USE_MONGO:
+        return mongo_database.coupons.find_one({"student_uid": uid, "meal": meal, "generated_at": {"$regex": "^" + re.escape(date_prefix)}}, sort=[("id", -1)])
+    conn = db(); row = conn.execute("SELECT * FROM coupons WHERE student_uid=? AND meal=? AND substr(generated_at,1,10)=? ORDER BY id DESC LIMIT 1", (uid, meal, date_prefix)).fetchone(); conn.close(); return row_dict(row)
+
+
+def add_coupon_record(data):
+    if USE_MONGO:
+        data = dict(data); data["id"] = next_mongo_id("coupons"); mongo_database.coupons.insert_one(data); return data
+    columns = list(data); conn = db(); conn.execute(f"INSERT INTO coupons ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})", [data[c] for c in columns]); conn.commit(); row = conn.execute("SELECT * FROM coupons WHERE token=?", (data["token"],)).fetchone(); conn.close(); return dict(row)
+
+
+def all_records():
+    if USE_MONGO:
+        records = list(mongo_database.coupons.find().sort("id", -1)); students = {s["student_uid"]: s for s in mongo_database.students.find()}
+        for record in records:
+            student = students.get(record["student_uid"], {})
+            record.update({key: student.get(key) for key in ["name", "roll_number", "branch", "hostel_room"]})
+        return records
+    conn = db(); rows = conn.execute("""SELECT coupons.*,students.name,students.roll_number,students.branch,students.hostel_room FROM coupons LEFT JOIN students ON coupons.student_uid=students.student_uid ORDER BY coupons.id DESC""").fetchall(); conn.close(); return [dict(row) for row in rows]
 
 
 @app.after_request
@@ -455,7 +655,11 @@ def root():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "service": "SmartMess"})
+    return jsonify({
+        "status": "ok",
+        "service": "SmartMess",
+        "database": "mongodb" if USE_MONGO else "sqlite",
+    })
 
 
 # =========================================================
@@ -558,21 +762,9 @@ def verify_coupon():
             "message": "Invalid QR."
         }), 400
 
-    conn = db()
-
-    # ---------------------------------------------------------
-    # FIND COUPON
-    # ---------------------------------------------------------
-
-    coupon = conn.execute("""
-        SELECT *
-        FROM coupons
-        WHERE token = ?
-    """, (token,)).fetchone()
+    coupon = coupon_by_token(token)
 
     if not coupon:
-        conn.close()
-
         return jsonify({
             "success": False,
             "message": "Coupon not found."
@@ -583,8 +775,6 @@ def verify_coupon():
     # ---------------------------------------------------------
 
     if coupon["status"] == "USED":
-
-        conn.close()
 
         return jsonify({
             "success": False,
@@ -602,14 +792,7 @@ def verify_coupon():
 
     if current_time() > expiry:
 
-        conn.execute("""
-            UPDATE coupons
-            SET status = 'EXPIRED'
-            WHERE id = ?
-        """, (coupon["id"],))
-
-        conn.commit()
-        conn.close()
+        update_coupon(coupon["id"], {"status": "EXPIRED"})
 
         return jsonify({
             "success": False,
@@ -620,18 +803,9 @@ def verify_coupon():
     # FIND STUDENT
     # ---------------------------------------------------------
 
-    student = conn.execute("""
-        SELECT *
-        FROM students
-        WHERE student_uid = ?
-        AND active = 1
-    """, (
-        coupon["student_uid"],
-    )).fetchone()
+    student = student_by_uid(coupon["student_uid"], active_only=True)
 
     if not student:
-
-        conn.close()
 
         return jsonify({
             "success": False,
@@ -646,22 +820,7 @@ def verify_coupon():
         "%Y-%m-%d %H:%M:%S"
     )
 
-    cursor = conn.execute("""
-        UPDATE coupons
-        SET status = 'USED',
-            used_at = ?
-        WHERE id = ?
-        AND status = 'ACTIVE'
-    """, (
-        used_time,
-        coupon["id"]
-    ))
-
-    conn.commit()
-
-    if cursor.rowcount != 1:
-
-        conn.close()
+    if update_coupon(coupon["id"], {"status": "USED", "used_at": used_time}, required_status="ACTIVE") != 1:
 
         return jsonify({
             "success": False,
@@ -714,14 +873,12 @@ def verify_coupon():
 
     photo_url = ""
 
-    if student["photo_filename"]:
+    if student.get("photo_filename") or student.get("photo_data"):
 
         photo_url = (
             "/student-photo/"
             + str(student["id"])
         )
-
-    conn.close()
 
     # ---------------------------------------------------------
     # SUCCESS RESPONSE
@@ -750,44 +907,15 @@ def admin_dashboard():
 
     today = current_time().strftime("%Y-%m-%d")
 
-    conn = db()
-
-    student_count = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM students
-        WHERE active = 1
-    """).fetchone()["c"]
-
-    boys_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND gender = 'BOY'").fetchone()["c"]
-    girls_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND gender = 'GIRL'").fetchone()["c"]
-    bh1_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND hostel_block = 'BH-1'").fetchone()["c"]
-    bh2_count = conn.execute("SELECT COUNT(*) AS c FROM students WHERE active = 1 AND hostel_block = 'BH-2'").fetchone()["c"]
-
-    breakfast = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM coupons
-        WHERE meal = 'BREAKFAST'
-        AND status = 'USED'
-        AND substr(generated_at, 1, 10) = ?
-    """, (today,)).fetchone()["c"]
-
-    lunch = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM coupons
-        WHERE meal = 'LUNCH'
-        AND status = 'USED'
-        AND substr(generated_at, 1, 10) = ?
-    """, (today,)).fetchone()["c"]
-
-    dinner = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM coupons
-        WHERE meal = 'DINNER'
-        AND status = 'USED'
-        AND substr(generated_at, 1, 10) = ?
-    """, (today,)).fetchone()["c"]
-
-    conn.close()
+    student_count = count_students()
+    boys_count = count_students({"gender": "BOY"})
+    girls_count = count_students({"gender": "GIRL"})
+    bh1_count = count_students({"hostel_block": "BH-1"})
+    bh2_count = count_students({"hostel_block": "BH-2"})
+    breakfast = coupon_count("BREAKFAST", today)
+    lunch = coupon_count("LUNCH", today)
+    dinner = coupon_count("DINNER", today)
+    database_label = "MongoDB Atlas (Permanent)" if USE_MONGO else "SQLite (Local)"
 
     html = f"""
     <!DOCTYPE html>
@@ -822,6 +950,10 @@ def admin_dashboard():
 
             <a class="btn gray" href="/admin/records">
                 📊 Records
+            </a>
+
+            <a class="btn green" href="/admin/meal-settings">
+                ⏰ Meal Settings
             </a>
 
             <a class="btn red" href="/admin/logout">
@@ -865,6 +997,11 @@ def admin_dashboard():
                 <h2>{dinner}</h2>
             </div>
 
+            <div class="stat">
+                <div>Database</div>
+                <h2 style="font-size:20px;">{database_label}</h2>
+            </div>
+
         </div>
 
         <div class="card">
@@ -895,6 +1032,75 @@ def admin_dashboard():
 
 
 # =========================================================
+# ADMIN - MEAL SETTINGS
+# =========================================================
+
+@app.route("/admin/meal-settings", methods=["GET", "POST"])
+def admin_meal_settings():
+    if not admin_required():
+        return redirect(url_for("admin_login"))
+
+    message = ""
+    message_class = "message success"
+    if request.method == "POST":
+        values = {}
+        valid = True
+        for meal in ["breakfast", "lunch", "dinner"]:
+            start = request.form.get(meal + "_start", "").strip()
+            end = request.form.get(meal + "_end", "").strip()
+            try:
+                start_time = datetime.strptime(start, "%H:%M")
+                end_time = datetime.strptime(end, "%H:%M")
+                if start_time >= end_time:
+                    valid = False
+            except ValueError:
+                valid = False
+            values[meal + "_open"] = "1" if request.form.get(meal + "_open") == "1" else "0"
+            values[meal + "_start"] = start
+            values[meal + "_end"] = end
+        if valid:
+            save_settings(values)
+            message = "Meal settings saved successfully."
+        else:
+            message = "Please select valid start and end times. End time must be later than start time."
+            message_class = "message error"
+
+    settings = {
+        meal: {
+            "open": get_setting(meal + "_open", "1") == "1",
+            "start": get_setting(meal + "_start"),
+            "end": get_setting(meal + "_end"),
+        }
+        for meal in ["breakfast", "lunch", "dinner"]
+    }
+
+    cards = ""
+    for meal, icon in [("breakfast", "🌅"), ("lunch", "☀️"), ("dinner", "🌙")]:
+        item = settings[meal]
+        cards += f"""
+        <div class="card">
+          <h2>{icon} {meal.title()}</h2>
+          <label style="display:flex;gap:10px;align-items:center;margin-bottom:18px">
+            <input type="checkbox" name="{meal}_open" value="1" {'checked' if item['open'] else ''} style="width:auto;margin:0">
+            Open for students
+          </label>
+          <label>Start Time</label><input type="time" name="{meal}_start" value="{item['start']}" required>
+          <label>End Time</label><input type="time" name="{meal}_end" value="{item['end']}" required>
+        </div>
+        """
+
+    return f"""<!DOCTYPE html><html><head><title>Meal Settings</title>{CSS}</head><body>
+    <div class="container">
+      <div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a><a class="btn blue" href="/admin/scanner">Scanner</a></div>
+      <h1>⏰ Meal Open/Close & Timings</h1>
+      {f'<div class="{message_class}">{escape(message)}</div>' if message else ''}
+      <form method="POST"><div class="grid">{cards}</div>
+        <div class="card center"><button class="btn green" type="submit">Save Meal Settings</button></div>
+      </form>
+    </div></body></html>"""
+
+
+# =========================================================
 # ADMIN - ADD STUDENT
 # =========================================================
 
@@ -917,11 +1123,12 @@ def admin_add_student():
         gender = request.form.get("gender", "").strip().upper()
         hostel_name = request.form.get("hostel_name", "").strip()
         hostel_block = request.form.get("hostel_block", "").strip()
+        pin = request.form.get("pin", "").strip()
         photo = request.files.get("photo")
 
         if (not name or not roll or branch not in BRANCHES or not room or
-                gender not in ["BOY", "GIRL"] or not hostel_name or
-                hostel_block not in HOSTEL_BLOCKS):
+                gender not in ["BOY", "GIRL"] or hostel_name not in ["Boys Hostel", "Girls Hostel"] or
+                hostel_block not in HOSTEL_BLOCKS or len(pin) != 4 or not pin.isdigit()):
 
             message = "Please fill every field."
             message_class = "message error"
@@ -933,17 +1140,9 @@ def admin_add_student():
 
         else:
 
-            conn = db()
-
-            exists = conn.execute("""
-                SELECT id
-                FROM students
-                WHERE roll_number = ?
-            """, (roll,)).fetchone()
+            exists = student_by_roll(roll)
 
             if exists:
-
-                conn.close()
 
                 message = "This Registration Number is already registered."
                 message_class = "message error"
@@ -958,55 +1157,27 @@ def admin_add_student():
 
                 if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
 
-                    conn.close()
-
                     message = "Use JPG, JPEG, PNG or WEBP."
                     message_class = "message error"
 
                 else:
 
                     filename = uid + ext
-
-                    photo.save(
-                        os.path.join(
-                            PHOTO_DIR,
-                            filename
-                        )
-                    )
-
-                    conn.execute("""
-                        INSERT INTO students
-                        (
-                            student_uid,
-                            name,
-                            roll_number,
-                            branch,
-                            hostel_room,
-                            gender,
-                            hostel_name,
-                            hostel_block,
-                            photo_filename,
-                            active,
-                            created_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                    """, (
-                        uid,
-                        name,
-                        roll,
-                        branch,
-                        room,
-                        gender,
-                        hostel_name,
-                        hostel_block,
-                        filename,
-                        current_time().strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                    ))
-
-                    conn.commit()
-                    conn.close()
+                    photo_bytes = photo.read()
+                    mime = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
+                    try:
+                        add_student_record({
+                            "student_uid": uid, "name": name, "roll_number": roll,
+                            "branch": branch, "hostel_room": room, "gender": gender,
+                            "hostel_name": hostel_name, "hostel_block": hostel_block,
+                            "photo_filename": filename, "photo_data": photo_bytes,
+                            "photo_mime": mime, "pin_hash": generate_password_hash(pin),
+                            "active": 1, "created_at": current_time().strftime("%Y-%m-%d %H:%M:%S")
+                        })
+                    except (DuplicateKeyError, sqlite3.IntegrityError):
+                        message = "This Registration Number is already registered."
+                        message_class = "message error"
+                        return redirect(url_for("admin_add_student"))
 
                     message = (
                         "Student registered successfully. "
@@ -1101,6 +1272,9 @@ def admin_add_student():
                     <option value="BH-2">BH-2</option>
                 </select>
 
+                <label>4-digit Student PIN</label>
+                <input type="password" name="pin" inputmode="numeric" minlength="4" maxlength="4" pattern="[0-9]{{4}}" required>
+
                 <label>Student Photo</label>
 
                 <input
@@ -1141,31 +1315,13 @@ def admin_students():
     hostel_filter = request.args.get("hostel", "").strip()
     branch_filter = request.args.get("branch", "").strip()
     block_filter = request.args.get("block", "").strip()
-    where, params = ["1=1"], []
-    if search:
-        where.append("(name LIKE ? OR roll_number LIKE ? OR branch LIKE ?)")
-        term = f"%{search}%"
-        params.extend([term, term, term])
-    if gender_filter in ["BOY", "GIRL"]:
-        where.append("gender = ?")
-        params.append(gender_filter)
-    if hostel_filter:
-        where.append("hostel_name = ?")
-        params.append(hostel_filter)
-    if branch_filter in BRANCHES:
-        where.append("branch = ?")
-        params.append(branch_filter)
-    if block_filter in HOSTEL_BLOCKS:
-        where.append("hostel_block = ?")
-        params.append(block_filter)
-
-    conn = db()
-    students = conn.execute(
-        "SELECT * FROM students WHERE " + " AND ".join(where) + " ORDER BY name",
-        params
-    ).fetchall()
-
-    conn.close()
+    students = list_student_records(
+        search=search,
+        gender=gender_filter if gender_filter in ["BOY", "GIRL"] else "",
+        hostel=hostel_filter if hostel_filter in ["Boys Hostel", "Girls Hostel"] else "",
+        branch=branch_filter if branch_filter in BRANCHES else "",
+        block=block_filter if block_filter in HOSTEL_BLOCKS else "",
+    )
 
     rows = ""
 
@@ -1173,7 +1329,7 @@ def admin_students():
 
         photo = "No Photo"
 
-        if student["photo_filename"]:
+        if student.get("photo_filename") or student.get("photo_data"):
 
             photo = f"""
                 <img
@@ -1285,10 +1441,8 @@ def admin_edit_student(student_id):
     if not admin_required():
         return redirect(url_for("admin_login"))
 
-    conn = db()
-    student = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    student = student_by_id(student_id)
     if not student:
-        conn.close()
         return "Student not found", 404
 
     message = ""
@@ -1300,34 +1454,45 @@ def admin_edit_student(student_id):
         gender = request.form.get("gender", "").strip().upper()
         hostel_name = request.form.get("hostel_name", "").strip()
         hostel_block = request.form.get("hostel_block", "").strip()
+        pin = request.form.get("pin", "").strip()
         photo = request.files.get("photo")
         if (not name or not registration or branch not in BRANCHES or not room or
-                gender not in ["BOY", "GIRL"] or not hostel_name or
+                gender not in ["BOY", "GIRL"] or hostel_name not in ["Boys Hostel", "Girls Hostel"] or
                 hostel_block not in HOSTEL_BLOCKS):
             message = "Please fill all required fields."
+        elif pin and (len(pin) != 4 or not pin.isdigit()):
+            message = "New PIN must contain exactly 4 numbers."
         else:
-            duplicate = conn.execute("SELECT id FROM students WHERE roll_number = ? AND id != ?", (registration, student_id)).fetchone()
-            if duplicate:
+            duplicate = student_by_roll(registration)
+            if duplicate and duplicate["id"] != student_id:
                 message = "Registration Number already exists."
             else:
-                photo_filename = student["photo_filename"]
+                changes = {
+                    "name": name,
+                    "roll_number": registration,
+                    "branch": branch,
+                    "hostel_room": room,
+                    "gender": gender,
+                    "hostel_name": hostel_name,
+                    "hostel_block": hostel_block,
+                }
                 if photo and photo.filename:
                     ext = os.path.splitext(photo.filename)[1].lower()
                     if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
                         message = "Use JPG, JPEG, PNG or WEBP photo."
                     else:
-                        photo_filename = student["student_uid"] + ext
-                        photo.save(os.path.join(PHOTO_DIR, photo_filename))
+                        changes.update({
+                            "photo_filename": student["student_uid"] + ext,
+                            "photo_data": photo.read(),
+                            "photo_mime": {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg"),
+                        })
+                if pin:
+                    changes["pin_hash"] = generate_password_hash(pin)
                 if not message:
-                    conn.execute("""UPDATE students SET name=?, roll_number=?, branch=?, hostel_room=?,
-                                 gender=?, hostel_name=?, hostel_block=?, photo_filename=? WHERE id=?""",
-                                 (name, registration, branch, room, gender, hostel_name, hostel_block, photo_filename, student_id))
-                    conn.commit()
-                    conn.close()
+                    update_student_record(student_id, changes)
                     return redirect(url_for("admin_students"))
 
-    student = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
-    conn.close()
+    student = student_by_id(student_id)
     html = f"""<!DOCTYPE html><html><head><title>Edit Student</title>{CSS}</head><body><div class="container">
     <div class="nav"><a class="btn" href="/admin/students">Back to Students</a></div>
     <div class="card"><h1>✏️ Edit Student</h1>{f'<div class="message error">{escape(message)}</div>' if message else ''}
@@ -1343,6 +1508,7 @@ def admin_edit_student(student_id):
         {''.join(f'<option value="{block}" {"selected" if student["hostel_block"] == block else ""}>{block}</option>' for block in HOSTEL_BLOCKS)}
       </select>
       <label>Room Number</label><input name="hostel_room" value="{escape(student['hostel_room'])}" required>
+      <label>Reset 4-digit PIN (optional)</label><input type="password" name="pin" inputmode="numeric" minlength="4" maxlength="4" pattern="[0-9]{{4}}" placeholder="Leave blank to keep current PIN">
       <label>Change Photo (optional)</label><input type="file" name="photo" accept="image/*">
       <button class="btn green" type="submit">Save Changes</button>
     </form></div></div></body></html>"""
@@ -1353,10 +1519,7 @@ def admin_edit_student(student_id):
 def admin_toggle_student(student_id):
     if not admin_required():
         return redirect(url_for("admin_login"))
-    conn = db()
-    conn.execute("UPDATE students SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE id = ?", (student_id,))
-    conn.commit()
-    conn.close()
+    toggle_student_record(student_id)
     return redirect(url_for("admin_students"))
 
 
@@ -1366,24 +1529,15 @@ def admin_toggle_student(student_id):
 
 @app.route("/student-photo/<int:student_id>")
 def student_photo(student_id):
-
-    conn = db()
-
-    student = conn.execute("""
-        SELECT photo_filename
-        FROM students
-        WHERE id = ?
-    """, (student_id,)).fetchone()
-
-    conn.close()
-
-    if not student or not student["photo_filename"]:
+    student = student_by_id(student_id)
+    if not student:
         return "Photo not found", 404
-
-    return send_from_directory(
-        PHOTO_DIR,
-        student["photo_filename"]
-    )
+    if student.get("photo_data"):
+        return Response(bytes(student["photo_data"]), mimetype=student.get("photo_mime") or "image/jpeg")
+    filename = student.get("photo_filename")
+    if filename and os.path.exists(os.path.join(PHOTO_DIR, filename)):
+        return send_from_directory(PHOTO_DIR, filename)
+    return "Photo not found", 404
 
 
 # =========================================================
@@ -1418,7 +1572,7 @@ def student_home():
                 <h1>🍽️ Smart Mess Student Panel</h1>
 
                 <p>
-                    Hostel student apna Registration Number enter kare.
+                    Registration Number aur 4-digit PIN se login kare.
                 </p>
 
             </div>
@@ -1431,6 +1585,18 @@ def student_home():
                     type="text"
                     name="roll_number"
                     placeholder="Enter your Registration Number"
+                    required
+                >
+
+                <label>4-digit PIN</label>
+                <input
+                    type="password"
+                    name="pin"
+                    inputmode="numeric"
+                    minlength="4"
+                    maxlength="4"
+                    pattern="[0-9]{{4}}"
+                    placeholder="Enter your 4-digit PIN"
                     required
                 >
 
@@ -1465,19 +1631,10 @@ def student_verify():
         "roll_number",
         ""
     ).strip()
+    pin = request.form.get("pin", "").strip()
+    student = student_by_roll(roll, active_only=True)
 
-    conn = db()
-
-    student = conn.execute("""
-        SELECT *
-        FROM students
-        WHERE roll_number = ?
-        AND active = 1
-    """, (roll,)).fetchone()
-
-    conn.close()
-
-    if not student:
+    if not student or not student.get("pin_hash") or not check_password_hash(student["pin_hash"], pin):
 
         return f"""
         <!DOCTYPE html>
@@ -1489,10 +1646,10 @@ def student_verify():
 
             <div class="card center">
 
-                <h1>❌ Student Not Found</h1>
+                <h1>❌ Login Failed</h1>
 
                 <div class="message error">
-                    This student is not registered as an active hostel student.
+                    Registration Number or PIN is incorrect, or this student is inactive.
                 </div>
 
                 <a class="btn" href="/student">
@@ -1528,16 +1685,7 @@ def student_meals():
     if not student_uid:
         return redirect(url_for("student_home"))
 
-    conn = db()
-
-    student = conn.execute("""
-        SELECT *
-        FROM students
-        WHERE student_uid = ?
-        AND active = 1
-    """, (student_uid,)).fetchone()
-
-    conn.close()
+    student = student_by_uid(student_uid, active_only=True)
 
     if not student:
 
@@ -1547,12 +1695,18 @@ def student_meals():
             url_for("student_home")
         )
 
-    photo = ""
+    photo = f"/student-photo/{student['id']}" if student.get("photo_filename") or student.get("photo_data") else ""
 
-    if student["photo_filename"]:
-
-        photo = image_data_uri(
-            student["photo_filename"]
+    meal_status_cards = ""
+    for meal, icon in [("BREAKFAST", "🌅"), ("LUNCH", "☀️"), ("DINNER", "🌙")]:
+        available, status_message = meal_is_available(meal)
+        if available:
+            status_html = '<span class="badge used-badge">OPEN NOW</span>'
+        else:
+            status_html = '<span class="badge expired-badge">CLOSED</span>'
+        meal_status_cards += (
+            f'<div class="stat"><div>{icon} {meal.title()}</div>'
+            f'<p>{status_html}</p><small>{escape(status_message) if status_message else "Coupon available"}</small></div>'
         )
 
     html = f"""
@@ -1602,6 +1756,8 @@ def student_meals():
             <h2 class="center">
                 Select Meal
             </h2>
+
+            <div class="grid" style="margin-bottom:20px;">{meal_status_cards}</div>
 
             <div class="meal-buttons">
 
@@ -1711,22 +1867,23 @@ def student_generate():
 
         return "Invalid meal.", 400
 
-    conn = db()
-
-    student = conn.execute("""
-        SELECT *
-        FROM students
-        WHERE student_uid = ?
-        AND active = 1
-    """, (student_uid,)).fetchone()
+    student = student_by_uid(student_uid, active_only=True)
 
     if not student:
-
-        conn.close()
-
         return redirect(
             url_for("student_home")
         )
+
+    available, unavailable_message = meal_is_available(meal)
+    if not available:
+        return f"""
+        <!DOCTYPE html><html><head><title>Meal Closed</title>{CSS}</head><body>
+        <div class="container"><div class="card center">
+          <h1>⏰ {meal.title()} Closed</h1>
+          <div class="message error">{escape(unavailable_message)}</div>
+          <a class="btn" href="/student/meals">Back to Meals</a>
+        </div></div></body></html>
+        """
 
     # -----------------------------------------------------
     # Check today's same meal
@@ -1734,25 +1891,11 @@ def student_generate():
 
     today = current_time().strftime("%Y-%m-%d")
 
-    existing = conn.execute("""
-        SELECT *
-        FROM coupons
-        WHERE student_uid = ?
-        AND meal = ?
-        AND substr(generated_at, 1, 10) = ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (
-        student_uid,
-        meal,
-        today
-    )).fetchone()
+    existing = latest_coupon(student_uid, meal, today)
 
     if existing:
 
         if existing["status"] == "USED":
-
-            conn.close()
 
             return f"""
             <!DOCTYPE html>
@@ -1797,8 +1940,6 @@ def student_generate():
 
             if current_time() < expiry:
 
-                conn.close()
-
                 # Show existing active coupon.
                 return render_coupon(
                     student,
@@ -1807,13 +1948,7 @@ def student_generate():
 
             else:
 
-                conn.execute("""
-                    UPDATE coupons
-                    SET status = 'EXPIRED'
-                    WHERE id = ?
-                """, (existing["id"],))
-
-                conn.commit()
+                update_coupon(existing["id"], {"status": "EXPIRED"})
 
     # -----------------------------------------------------
     # Create new coupon
@@ -1825,38 +1960,15 @@ def student_generate():
 
     token = make_coupon_token()
 
-    conn.execute("""
-        INSERT INTO coupons
-        (
-            token,
-            student_uid,
-            meal,
-            generated_at,
-            expires_at,
-            status
-        )
-        VALUES (?, ?, ?, ?, ?, 'ACTIVE')
-    """, (
-        token,
-        student_uid,
-        meal,
-        generated.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        expires.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-    ))
-
-    conn.commit()
-
-    coupon = conn.execute("""
-        SELECT *
-        FROM coupons
-        WHERE token = ?
-    """, (token,)).fetchone()
-
-    conn.close()
+    coupon = add_coupon_record({
+        "token": token,
+        "student_uid": student_uid,
+        "meal": meal,
+        "generated_at": generated.strftime("%Y-%m-%d %H:%M:%S"),
+        "expires_at": expires.strftime("%Y-%m-%d %H:%M:%S"),
+        "used_at": None,
+        "status": "ACTIVE",
+    })
 
     return render_coupon(
         student,
@@ -1869,14 +1981,7 @@ def student_generate():
 # =========================================================
 
 def render_coupon(student, coupon):
-
-    photo = ""
-
-    if student["photo_filename"]:
-
-        photo = image_data_uri(
-            student["photo_filename"]
-        )
+    photo = f"/student-photo/{student['id']}" if student.get("photo_filename") or student.get("photo_data") else ""
 
     qr = qr_data_uri(
         coupon["token"]
@@ -2301,65 +2406,6 @@ def admin_scanner():
     """
 
     return html
-    # =====================================================
-    # SAVE SUCCESSFUL SCAN TO GOOGLE SHEET
-    # =====================================================
-
-    try:
-
-        GOOGLE_SHEET_URL = (
-            "https://script.google.com/macros/s/"
-            "AKfycbzRjb3Xh_O95l9N18VJKhUVs6-4qb99Ybr60zmyxIp-amMOtBPnFzArpyJo2tlyl1zE/exec"
-        )
-
-        sheet_data = {
-            "date": current_time().strftime("%d-%m-%Y"),
-            "time": current_time().strftime("%H:%M:%S"),
-            "name": student["name"],
-            "roll": student["roll_number"],
-            "branch": student["branch"],
-            "room": student["hostel_room"],
-            "meal": coupon["meal"],
-            "status": "USED"
-        }
-
-        response = requests.post(
-            GOOGLE_SHEET_URL,
-            json=sheet_data,
-            timeout=10
-        )
-
-        print(
-            "Google Sheet:",
-            response.text
-        )
-
-    except Exception as e:
-
-        print(
-            "Google Sheet Error:",
-            e
-        )
-
-    conn.close()
-
-    photo_url = ""
-
-    if student["photo_filename"]:
-        photo_url = (
-            "/student-photo/"
-            + str(student["id"])
-        )
-
-    return jsonify({
-        "success": True,
-        "name": student["name"],
-        "roll": student["roll_number"],
-        "branch": student["branch"],
-        "room": student["hostel_room"],
-        "meal": coupon["meal"],
-        "photo": photo_url
-    })
 
 # =========================================================
 # ADMIN RECORDS
@@ -2373,23 +2419,7 @@ def admin_records():
             url_for("admin_login")
         )
 
-    conn = db()
-
-    records = conn.execute("""
-        SELECT
-            coupons.*,
-            students.name,
-            students.roll_number,
-            students.branch,
-            students.hostel_room
-        FROM coupons
-        LEFT JOIN students
-        ON coupons.student_uid =
-           students.student_uid
-        ORDER BY coupons.id DESC
-    """).fetchall()
-
-    conn.close()
+    records = all_records()
 
     rows = ""
 
