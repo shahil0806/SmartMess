@@ -7,6 +7,7 @@ from flask import (
     render_template_string,
     jsonify,
     send_from_directory,
+    send_file,
     Response
 )
 
@@ -17,6 +18,7 @@ import string
 import base64
 import hmac
 import re
+import json
 from io import BytesIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -25,6 +27,14 @@ import qrcode
 import requests
 from markupsafe import escape
 from werkzeug.security import generate_password_hash, check_password_hash
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 try:
     from pymongo import MongoClient, ASCENDING, ReturnDocument
@@ -102,6 +112,8 @@ def init_db():
         "breakfast_open": "1", "breakfast_start": "07:00", "breakfast_end": "09:00",
         "lunch_open": "1", "lunch_start": "12:00", "lunch_end": "14:30",
         "dinner_open": "1", "dinner_start": "19:00", "dinner_end": "22:00",
+        "breakfast_menu": "", "lunch_menu": "", "dinner_menu": "",
+        "student_notice": "Welcome to SmartMess.",
     }
 
     if USE_MONGO:
@@ -110,6 +122,8 @@ def init_db():
         mongo_database.students.create_index([("roll_number", ASCENDING)], unique=True)
         mongo_database.coupons.create_index([("token", ASCENDING)], unique=True)
         mongo_database.coupons.create_index([("student_uid", ASCENDING), ("meal", ASCENDING), ("generated_at", ASCENDING)])
+        mongo_database.skipped_meals.create_index([("student_uid", ASCENDING), ("meal", ASCENDING), ("skip_date", ASCENDING)], unique=True)
+        mongo_database.admins.create_index([("username", ASCENDING)], unique=True)
         for key, value in defaults.items():
             mongo_database.settings.update_one({"_id": key}, {"$setOnInsert": {"value": value}}, upsert=True)
         for student in mongo_database.students.find({"$or": [{"pin_hash": {"$exists": False}}, {"pin_hash": ""}]}):
@@ -139,6 +153,15 @@ def init_db():
         expires_at TEXT NOT NULL, used_at TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE'
     )""")
     conn.execute("CREATE TABLE IF NOT EXISTS settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS skipped_meals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, student_uid TEXT NOT NULL, meal TEXT NOT NULL,
+        skip_date TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(student_uid, meal, skip_date)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS admins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL, role TEXT NOT NULL, active INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL
+    )""")
     for key, value in defaults.items():
         conn.execute("INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)", (key, value))
     for student in conn.execute("SELECT id, roll_number FROM students WHERE pin_hash IS NULL OR pin_hash = ''"):
@@ -179,8 +202,17 @@ def make_coupon_token():
     )
 
 
-def admin_required():
-    return session.get("admin") is True
+def admin_required(roles=None):
+    if session.get("admin") is not True:
+        return False
+    if roles is None:
+        return True
+    return session.get("admin_role", "MAIN") in roles
+
+
+def admin_scope_gender():
+    role = session.get("admin_role", "MAIN")
+    return "BOY" if role == "BOYS" else "GIRL" if role == "GIRLS" else ""
 
 
 def row_dict(row):
@@ -333,6 +365,93 @@ def all_records():
             record.update({key: student.get(key) for key in ["name", "roll_number", "branch", "hostel_room"]})
         return records
     conn = db(); rows = conn.execute("""SELECT coupons.*,students.name,students.roll_number,students.branch,students.hostel_room FROM coupons LEFT JOIN students ON coupons.student_uid=students.student_uid ORDER BY coupons.id DESC""").fetchall(); conn.close(); return [dict(row) for row in rows]
+
+
+def list_used_records(start_date="", end_date="", gender="", meal="", registration=""):
+    records = [r for r in all_records() if r.get("status") == "USED"]
+    students = {s["student_uid"]: s for s in list_student_records()}
+    result = []
+    for record in records:
+        student = students.get(record.get("student_uid"), {})
+        item = dict(record)
+        item.update({key: student.get(key, item.get(key)) for key in [
+            "name", "roll_number", "branch", "hostel_room", "gender", "hostel_name", "hostel_block"
+        ]})
+        used_date = (item.get("used_at") or item.get("generated_at") or "")[:10]
+        if start_date and used_date < start_date: continue
+        if end_date and used_date > end_date: continue
+        if gender and item.get("gender") != gender: continue
+        if meal and item.get("meal") != meal: continue
+        if registration and item.get("roll_number") != registration: continue
+        result.append(item)
+    return result
+
+
+def daily_meal_series(days, gender=""):
+    end = current_time().date()
+    labels, breakfast, lunch, dinner = [], [], [], []
+    records = list_used_records((end - timedelta(days=days - 1)).isoformat(), end.isoformat(), gender=gender)
+    for offset in range(days - 1, -1, -1):
+        day = end - timedelta(days=offset)
+        date_text = day.isoformat()
+        labels.append(day.strftime("%d %b"))
+        for meal, target in [("BREAKFAST", breakfast), ("LUNCH", lunch), ("DINNER", dinner)]:
+            target.append(sum(1 for r in records if (r.get("used_at") or "")[:10] == date_text and r.get("meal") == meal))
+    return {"labels": labels, "breakfast": breakfast, "lunch": lunch, "dinner": dinner}
+
+
+def add_skip_record(uid, meal, skip_date):
+    data = {"student_uid": uid, "meal": meal, "skip_date": skip_date,
+            "created_at": current_time().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        if USE_MONGO:
+            data["id"] = next_mongo_id("skipped_meals"); mongo_database.skipped_meals.insert_one(data)
+        else:
+            conn = db(); conn.execute("INSERT INTO skipped_meals (student_uid,meal,skip_date,created_at) VALUES (?,?,?,?)",
+                                      (uid, meal, skip_date, data["created_at"])); conn.commit(); conn.close()
+        return True
+    except (DuplicateKeyError, sqlite3.IntegrityError):
+        return False
+
+
+def list_skips(uid="", start_date="", end_date=""):
+    if USE_MONGO:
+        query = {}
+        if uid: query["student_uid"] = uid
+        if start_date or end_date:
+            query["skip_date"] = {}
+            if start_date: query["skip_date"]["$gte"] = start_date
+            if end_date: query["skip_date"]["$lte"] = end_date
+        return list(mongo_database.skipped_meals.find(query).sort("skip_date", -1))
+    where, params = ["1=1"], []
+    if uid: where.append("student_uid=?"); params.append(uid)
+    if start_date: where.append("skip_date>=?"); params.append(start_date)
+    if end_date: where.append("skip_date<=?"); params.append(end_date)
+    conn = db(); rows = conn.execute("SELECT * FROM skipped_meals WHERE " + " AND ".join(where) + " ORDER BY skip_date DESC", params).fetchall(); conn.close()
+    return [dict(row) for row in rows]
+
+
+def find_admin(username):
+    if USE_MONGO: return mongo_database.admins.find_one({"username": username.lower()})
+    conn = db(); row = conn.execute("SELECT * FROM admins WHERE username=?", (username.lower(),)).fetchone(); conn.close(); return row_dict(row)
+
+
+def list_admins():
+    if USE_MONGO: return list(mongo_database.admins.find().sort("username", ASCENDING))
+    conn = db(); rows = conn.execute("SELECT * FROM admins ORDER BY username").fetchall(); conn.close(); return [dict(r) for r in rows]
+
+
+def add_admin_account(username, password, role):
+    data = {"username": username.lower(), "password_hash": generate_password_hash(password), "role": role,
+            "active": 1, "created_at": current_time().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        if USE_MONGO:
+            data["id"] = next_mongo_id("admins"); mongo_database.admins.insert_one(data)
+        else:
+            conn = db(); conn.execute("INSERT INTO admins (username,password_hash,role,active,created_at) VALUES (?,?,?,?,?)",
+                                      (data["username"], data["password_hash"], role, 1, data["created_at"])); conn.commit(); conn.close()
+        return True
+    except (DuplicateKeyError, sqlite3.IntegrityError): return False
 
 
 @app.after_request
@@ -676,13 +795,23 @@ def admin_login():
 
     if request.method == "POST":
 
+        username = request.form.get("username", "main").strip().lower() or "main"
         password = request.form.get("password", "")
 
-        if hmac.compare_digest(password, ADMIN_PASSWORD):
+        if username in ["main", "admin"] and hmac.compare_digest(password, ADMIN_PASSWORD):
 
             session["admin"] = True
+            session["admin_role"] = "MAIN"
+            session["admin_username"] = "main"
 
             return redirect(url_for("admin_dashboard"))
+
+        account = find_admin(username)
+        if account and account.get("active", 1) and check_password_hash(account["password_hash"], password):
+            session["admin"] = True
+            session["admin_role"] = account["role"]
+            session["admin_username"] = account["username"]
+            return redirect(url_for("admin_scanner" if account["role"] == "SCANNER" else "admin_dashboard"))
 
         error = "Wrong admin password."
 
@@ -706,7 +835,10 @@ def admin_login():
 
             <form method="POST">
 
-                <label>Admin Password</label>
+                <label>Username</label>
+                <input name="username" value="main" required>
+
+                <label>Password</label>
 
                 <input
                     type="password"
@@ -732,8 +864,7 @@ def admin_login():
 
 @app.route("/admin/logout")
 def admin_logout():
-
-    session.pop("admin", None)
+    session.clear()
 
     return redirect(url_for("admin_login"))
 
@@ -904,17 +1035,27 @@ def admin_dashboard():
 
     if not admin_required():
         return redirect(url_for("admin_login"))
+    if session.get("admin_role") == "SCANNER":
+        return redirect(url_for("admin_scanner"))
 
     today = current_time().strftime("%Y-%m-%d")
 
-    student_count = count_students()
-    boys_count = count_students({"gender": "BOY"})
-    girls_count = count_students({"gender": "GIRL"})
-    bh1_count = count_students({"hostel_block": "BH-1"})
-    bh2_count = count_students({"hostel_block": "BH-2"})
-    breakfast = coupon_count("BREAKFAST", today)
-    lunch = coupon_count("LUNCH", today)
-    dinner = coupon_count("DINNER", today)
+    scope_gender = admin_scope_gender()
+    scope = {"gender": scope_gender} if scope_gender else {}
+    student_count = count_students(scope)
+    boys_count = count_students({"gender": "BOY"}) if not scope_gender or scope_gender == "BOY" else 0
+    girls_count = count_students({"gender": "GIRL"}) if not scope_gender or scope_gender == "GIRL" else 0
+    bh1_count = count_students({**scope, "hostel_block": "BH-1"})
+    bh2_count = count_students({**scope, "hostel_block": "BH-2"})
+    today_records = list_used_records(today, today, gender=scope_gender)
+    breakfast = sum(r["meal"] == "BREAKFAST" for r in today_records)
+    lunch = sum(r["meal"] == "LUNCH" for r in today_records)
+    dinner = sum(r["meal"] == "DINNER" for r in today_records)
+    present_uids = {r["student_uid"] for r in today_records}
+    absent = max(student_count - len(present_uids), 0)
+    skipped = len(list_skips(start_date=today, end_date=today))
+    chart7 = json.dumps(daily_meal_series(7, scope_gender))
+    chart30 = json.dumps(daily_meal_series(30, scope_gender))
     database_label = "MongoDB Atlas (Permanent)" if USE_MONGO else "SQLite (Local)"
 
     html = f"""
@@ -923,6 +1064,7 @@ def admin_dashboard():
     <head>
         <title>Admin Dashboard</title>
         {CSS}
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
 
     <body>
@@ -951,6 +1093,10 @@ def admin_dashboard():
             <a class="btn gray" href="/admin/records">
                 📊 Records
             </a>
+
+            <a class="btn blue" href="/admin/reports">📥 Reports</a>
+            <a class="btn green" href="/admin/menu-notice">📋 Menu & Notice</a>
+            {'<a class="btn gray" href="/admin/roles">🔐 Admin Roles</a>' if admin_required(['MAIN']) else ''}
 
             <a class="btn green" href="/admin/meal-settings">
                 ⏰ Meal Settings
@@ -997,6 +1143,9 @@ def admin_dashboard():
                 <h2>{dinner}</h2>
             </div>
 
+            <div class="stat"><div>Absent Today</div><h2>{absent}</h2></div>
+            <div class="stat"><div>Skipped Today</div><h2>{skipped}</h2></div>
+
             <div class="stat">
                 <div>Database</div>
                 <h2 style="font-size:20px;">{database_label}</h2>
@@ -1004,26 +1153,20 @@ def admin_dashboard():
 
         </div>
 
-        <div class="card">
-            <h2>How it works</h2>
-
-            <p>
-                Admin registers hostel students with photo.
-            </p>
-
-            <p>
-                Student uses the Student Panel to generate
-                a meal coupon.
-            </p>
-
-            <p>
-                Coupon QR is valid for 5 minutes and can
-                be used only once.
-            </p>
-
+        <div class="grid">
+          <div class="card"><h2>Last 7 Days</h2><canvas id="chart7"></canvas></div>
+          <div class="card"><h2>Last 30 Days</h2><canvas id="chart30"></canvas></div>
         </div>
 
     </div>
+    <script>
+    function draw(id, data) {{ new Chart(document.getElementById(id), {{type:'line',data:{{labels:data.labels,datasets:[
+      {{label:'Breakfast',data:data.breakfast,borderColor:'#f59e0b',tension:.35}},
+      {{label:'Lunch',data:data.lunch,borderColor:'#0ea5e9',tension:.35}},
+      {{label:'Dinner',data:data.dinner,borderColor:'#8b5cf6',tension:.35}}
+    ]}},options:{{responsive:true,plugins:{{legend:{{position:'bottom'}}}},scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}}}}}}}}); }}
+    draw('chart7', {chart7}); draw('chart30', {chart30});
+    </script>
     </body>
     </html>
     """
@@ -1108,7 +1251,7 @@ def admin_meal_settings():
 @app.route("/admin/add-student", methods=["GET", "POST"])
 def admin_add_student():
 
-    if not admin_required():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]):
         return redirect(url_for("admin_login"))
 
     message = ""
@@ -1121,6 +1264,7 @@ def admin_add_student():
         branch = request.form.get("branch", "").strip()
         room = request.form.get("hostel_room", "").strip()
         gender = request.form.get("gender", "").strip().upper()
+        if admin_scope_gender(): gender = admin_scope_gender()
         hostel_name = request.form.get("hostel_name", "").strip()
         hostel_block = request.form.get("hostel_block", "").strip()
         pin = request.form.get("pin", "").strip()
@@ -1307,11 +1451,12 @@ def admin_add_student():
 @app.route("/admin/students")
 def admin_students():
 
-    if not admin_required():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]):
         return redirect(url_for("admin_login"))
 
     search = request.args.get("q", "").strip()
     gender_filter = request.args.get("gender", "").strip().upper()
+    if admin_scope_gender(): gender_filter = admin_scope_gender()
     hostel_filter = request.args.get("hostel", "").strip()
     branch_filter = request.args.get("branch", "").strip()
     block_filter = request.args.get("block", "").strip()
@@ -1438,12 +1583,14 @@ def admin_students():
 
 @app.route("/admin/student/<int:student_id>/edit", methods=["GET", "POST"])
 def admin_edit_student(student_id):
-    if not admin_required():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]):
         return redirect(url_for("admin_login"))
 
     student = student_by_id(student_id)
     if not student:
         return "Student not found", 404
+    if admin_scope_gender() and student.get("gender") != admin_scope_gender():
+        return "Not allowed for this hostel admin.", 403
 
     message = ""
     if request.method == "POST":
@@ -1452,6 +1599,7 @@ def admin_edit_student(student_id):
         branch = request.form.get("branch", "").strip()
         room = request.form.get("hostel_room", "").strip()
         gender = request.form.get("gender", "").strip().upper()
+        if admin_scope_gender(): gender = admin_scope_gender()
         hostel_name = request.form.get("hostel_name", "").strip()
         hostel_block = request.form.get("hostel_block", "").strip()
         pin = request.form.get("pin", "").strip()
@@ -1517,8 +1665,11 @@ def admin_edit_student(student_id):
 
 @app.route("/admin/student/<int:student_id>/toggle", methods=["POST"])
 def admin_toggle_student(student_id):
-    if not admin_required():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]):
         return redirect(url_for("admin_login"))
+    student = student_by_id(student_id)
+    if admin_scope_gender() and student and student.get("gender") != admin_scope_gender():
+        return "Not allowed for this hostel admin.", 403
     toggle_student_record(student_id)
     return redirect(url_for("admin_students"))
 
@@ -1709,6 +1860,14 @@ def student_meals():
             f'<p>{status_html}</p><small>{escape(status_message) if status_message else "Coupon available"}</small></div>'
         )
 
+    today = current_time().strftime("%Y-%m-%d")
+    month_start = current_time().strftime("%Y-%m-01")
+    history = list_used_records(month_start, today, registration=student["roll_number"])
+    history_rows = "".join(f"<tr><td>{(r.get('used_at') or '')[:10]}</td><td>{r.get('meal','-')}</td><td>{(r.get('used_at') or '')[11:19]}</td></tr>" for r in history[:31])
+    menus = {meal: get_setting(meal.lower() + "_menu", "Menu not updated") or "Menu not updated" for meal in ["BREAKFAST", "LUNCH", "DINNER"]}
+    notice = get_setting("student_notice", "")
+    tomorrow = (current_time().date() + timedelta(days=1)).isoformat()
+
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -1752,6 +1911,14 @@ def student_meals():
 
 
         <div class="card">
+
+            {f'<div class="message"><b>📢 Notice:</b> {escape(notice)}</div>' if notice else ''}
+            <h2 class="center">🍽️ Today's Menu</h2>
+            <div class="grid">
+              <div class="stat"><b>Breakfast</b><p>{escape(menus['BREAKFAST'])}</p></div>
+              <div class="stat"><b>Lunch</b><p>{escape(menus['LUNCH'])}</p></div>
+              <div class="stat"><b>Dinner</b><p>{escape(menus['DINNER'])}</p></div>
+            </div>
 
             <h2 class="center">
                 Select Meal
@@ -1816,6 +1983,14 @@ def student_meals():
 
             </div>
 
+        </div>
+
+        <div class="grid">
+          <div class="card"><h2>⏭️ Skip a Meal</h2><p>Tell the mess in advance to reduce food waste.</p>
+            <form method="post" action="/student/skip-meal"><label>Meal</label><select name="meal"><option>BREAKFAST</option><option>LUNCH</option><option>DINNER</option></select>
+            <label>Date</label><select name="skip_date"><option value="{today}">Today</option><option value="{tomorrow}">Tomorrow</option></select><button class="btn red">Skip Meal</button></form>
+          </div>
+          <div class="card"><h2>📅 This Month History</h2><p>Total meals: <b>{len(history)}</b></p><div style="overflow:auto"><table><tr><th>Date</th><th>Meal</th><th>Time</th></tr>{history_rows or '<tr><td colspan="3">No meals yet.</td></tr>'}</table></div></div>
         </div>
 
 
@@ -1890,6 +2065,11 @@ def student_generate():
     # -----------------------------------------------------
 
     today = current_time().strftime("%Y-%m-%d")
+
+    if any(item["meal"] == meal for item in list_skips(student_uid, today, today)):
+        return f"""<!DOCTYPE html><html><head><title>Meal Skipped</title>{CSS}</head><body><div class="container"><div class="card center">
+        <h1>⏭️ Meal Skipped</h1><div class="message error">You marked today's {meal.title()} as skipped.</div><a class="btn" href="/student/meals">Back</a>
+        </div></div></body></html>"""
 
     existing = latest_coupon(student_uid, meal, today)
 
@@ -1974,6 +2154,18 @@ def student_generate():
         student,
         coupon
     )
+
+
+@app.route("/student/skip-meal", methods=["POST"])
+def student_skip_meal():
+    uid = session.get("student_uid")
+    if not uid: return redirect(url_for("student_home"))
+    meal, skip_date = request.form.get("meal", "").upper(), request.form.get("skip_date", "")
+    allowed_dates = {current_time().date().isoformat(), (current_time().date() + timedelta(days=1)).isoformat()}
+    if meal not in ["BREAKFAST", "LUNCH", "DINNER"] or skip_date not in allowed_dates: return "Invalid meal or date.", 400
+    success = add_skip_record(uid, meal, skip_date)
+    text = "Skip meal saved. Thank you for helping reduce food waste." if success else "This meal is already marked as skipped."
+    return f"""<!DOCTYPE html><html><head><title>Skip Meal</title>{CSS}</head><body><div class="container"><div class="card center"><h1>⏭️ Skip Meal</h1><div class="message {'success' if success else 'error'}">{text}</div><a class="btn" href="/student/meals">Back to Meals</a></div></div></body></html>"""
 
 
 # =========================================================
@@ -2161,6 +2353,107 @@ def student_logout():
 # ADMIN SCANNER
 # =========================================================
 
+@app.route("/admin/reports")
+def admin_reports():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]): return redirect(url_for("admin_login"))
+    today = current_time().strftime("%Y-%m-%d")
+    month = current_time().strftime("%Y-%m")
+    students = list_student_records(gender=admin_scope_gender())
+    options = "".join(f'<option value="{escape(s["roll_number"])}">{escape(s["name"])} - {escape(s["roll_number"])}</option>' for s in students)
+    return f"""<!DOCTYPE html><html><head><title>SmartMess Reports</title>{CSS}</head><body><div class="container">
+    <div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a><a class="btn gray" href="/admin/records">Records</a></div>
+    <div class="card"><h1>📥 Excel & PDF Reports</h1><p>Today, monthly, meal-wise, gender-wise and individual student reports.</p>
+    <form action="/admin/report/download" method="get">
+      <div class="grid">
+       <div><label>From Date</label><input type="date" name="start" value="{today}"></div>
+       <div><label>To Date</label><input type="date" name="end" value="{today}"></div>
+       <div><label>Gender</label><select name="gender"><option value="">All</option><option value="BOY">Boys</option><option value="GIRL">Girls</option></select></div>
+       <div><label>Meal</label><select name="meal"><option value="">All Meals</option><option>BREAKFAST</option><option>LUNCH</option><option>DINNER</option></select></div>
+       <div><label>Individual Student</label><select name="registration"><option value="">All Students</option>{options}</select></div>
+       <div><label>Format</label><select name="format"><option value="xlsx">Excel (.xlsx)</option><option value="pdf">PDF</option></select></div>
+      </div><button class="btn green" type="submit">Download Report</button>
+      <a class="btn blue" href="/admin/report/download?start={month}-01&end={today}&format=xlsx">This Month Excel</a>
+    </form></div></div></body></html>"""
+
+
+@app.route("/admin/report/download")
+def admin_report_download():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]): return redirect(url_for("admin_login"))
+    today = current_time().strftime("%Y-%m-%d")
+    start, end = request.args.get("start", today), request.args.get("end", today)
+    gender = admin_scope_gender() or request.args.get("gender", "")
+    meal = request.args.get("meal", "")
+    registration = request.args.get("registration", "")
+    records = list_used_records(start, end, gender, meal, registration)
+    title = f"SmartMess Attendance Report ({start} to {end})"
+    headers = ["Date", "Time", "Name", "Registration No.", "Gender", "Branch", "Hostel", "Block", "Room", "Meal"]
+    rows = []
+    for r in records:
+        used = r.get("used_at") or r.get("generated_at") or ""
+        rows.append([used[:10], used[11:19], r.get("name", "-"), r.get("roll_number", "-"), r.get("gender", "-"),
+                     r.get("branch", "-"), r.get("hostel_name", "-"), r.get("hostel_block", "-"), r.get("hostel_room", "-"), r.get("meal", "-")])
+    fmt = request.args.get("format", "xlsx")
+    if fmt == "pdf":
+        buffer = BytesIO(); doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10*mm, leftMargin=10*mm, topMargin=12*mm, bottomMargin=12*mm)
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("SmartMessTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=colors.HexColor("#102b4f"), spaceAfter=8)
+        body_style = ParagraphStyle("SmartMessBody", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12)
+        story = [Paragraph(title, title_style), Paragraph(f"Total attendance records: {len(rows)}", body_style), Spacer(1, 10)]
+        table = Table([headers] + rows, repeatRows=1, colWidths=[23*mm,19*mm,33*mm,31*mm,18*mm,29*mm,25*mm,16*mm,16*mm,22*mm])
+        table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#102b4f")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#cbd5e1")),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#f8fafc")]),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("PADDING",(0,0),(-1,-1),4)]))
+        story.append(table); doc.build(story); buffer.seek(0)
+        return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=f"SmartMess_Report_{start}_{end}.pdf")
+    wb = Workbook(); ws = wb.active; ws.title = "Attendance"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers)); ws["A1"] = title
+    ws["A1"].font = Font(size=18, bold=True, color="FFFFFF"); ws["A1"].fill = PatternFill("solid", fgColor="102B4F"); ws["A1"].alignment = Alignment(horizontal="center")
+    ws.append([f"Total records: {len(rows)}"]); ws.append([]); ws.append(headers)
+    for cell in ws[4]: cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="2563EB")
+    for row in rows: ws.append(row)
+    thin = Side(style="thin", color="D9E2F0")
+    for row in ws.iter_rows(min_row=4):
+        for cell in row: cell.border = Border(bottom=thin); cell.alignment = Alignment(vertical="center")
+    widths = [13,11,24,21,12,25,20,12,12,15]
+    for i, width in enumerate(widths, 1): ws.column_dimensions[get_column_letter(i)].width = width
+    ws.freeze_panes = "A5"; ws.auto_filter.ref = f"A4:J{max(4, ws.max_row)}"
+    buffer = BytesIO(); wb.save(buffer); buffer.seek(0)
+    return send_file(buffer, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name=f"SmartMess_Report_{start}_{end}.xlsx")
+
+
+@app.route("/admin/menu-notice", methods=["GET", "POST"])
+def admin_menu_notice():
+    if not admin_required(["MAIN", "BOYS", "GIRLS"]): return redirect(url_for("admin_login"))
+    message = ""
+    if request.method == "POST":
+        save_settings({key: request.form.get(key, "").strip() for key in ["breakfast_menu", "lunch_menu", "dinner_menu", "student_notice"]}); message = "Menu and notice saved."
+    values = {key: get_setting(key, "") for key in ["breakfast_menu", "lunch_menu", "dinner_menu", "student_notice"]}
+    return f"""<!DOCTYPE html><html><head><title>Menu & Notice</title>{CSS}</head><body><div class="container">
+    <div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div><div class="card"><h1>📋 Menu & Notice</h1>
+    {f'<div class="message success">{message}</div>' if message else ''}<form method="post">
+    <label>Breakfast Menu</label><input name="breakfast_menu" value="{escape(values['breakfast_menu'])}">
+    <label>Lunch Menu</label><input name="lunch_menu" value="{escape(values['lunch_menu'])}">
+    <label>Dinner Menu</label><input name="dinner_menu" value="{escape(values['dinner_menu'])}">
+    <label>Student Notice</label><input name="student_notice" value="{escape(values['student_notice'])}">
+    <button class="btn green">Save Menu & Notice</button></form></div></div></body></html>"""
+
+
+@app.route("/admin/roles", methods=["GET", "POST"])
+def admin_roles():
+    if not admin_required(["MAIN"]): return redirect(url_for("admin_dashboard"))
+    message = ""
+    if request.method == "POST":
+        username, password, role = request.form.get("username", "").strip(), request.form.get("password", ""), request.form.get("role", "")
+        if len(username) < 3 or len(password) < 8 or role not in ["BOYS", "GIRLS", "SCANNER"]: message = "Use 3+ character username and 8+ character password."
+        elif add_admin_account(username, password, role): message = "Admin account created successfully."
+        else: message = "Username already exists."
+    rows = "".join(f"<tr><td>{escape(a['username'])}</td><td>{a['role']}</td><td>{'Active' if a.get('active',1) else 'Inactive'}</td></tr>" for a in list_admins())
+    return f"""<!DOCTYPE html><html><head><title>Admin Roles</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div>
+    <div class="card"><h1>🔐 Admin Roles</h1>{f'<div class="message">{escape(message)}</div>' if message else ''}<form method="post"><div class="grid">
+    <div><label>Username</label><input name="username" required></div><div><label>Password</label><input type="password" name="password" minlength="8" required></div>
+    <div><label>Role</label><select name="role"><option value="BOYS">Boys Hostel Admin</option><option value="GIRLS">Girls Hostel Admin</option><option value="SCANNER">Scanner Operator</option></select></div></div>
+    <button class="btn green">Create Account</button></form></div><div class="card"><table><tr><th>Username</th><th>Role</th><th>Status</th></tr>{rows}</table></div></div></body></html>"""
+
 # =========================================================
 # ADMIN QR SCANNER
 # =========================================================
@@ -2195,8 +2488,8 @@ def admin_scanner():
             }}
 
             .big-photo {{
-                width: 150px;
-                height: 150px;
+                width: 230px;
+                height: 230px;
                 object-fit: cover;
                 border-radius: 15px;
                 display: block;
@@ -2249,6 +2542,14 @@ def admin_scanner():
 
     let processing = false;
 
+    function sound(ok) {{
+        const audio = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audio.createOscillator(); const gain = audio.createGain();
+        oscillator.connect(gain); gain.connect(audio.destination);
+        oscillator.frequency.value = ok ? 880 : 190; gain.gain.value = .22;
+        oscillator.start(); oscillator.stop(audio.currentTime + (ok ? .22 : .55));
+    }}
+
     async function verifyCoupon(token) {{
 
         if (processing) {{
@@ -2276,6 +2577,8 @@ def admin_scanner():
 
             if (data.success) {{
 
+                sound(true);
+
                 const photo =
                     data.photo
                     ?
@@ -2291,7 +2594,7 @@ def admin_scanner():
 
                     "<div class='message success'>"
 
-                    + "<h2>✅ COUPON VALID</h2>"
+                    + "<h1 style='font-size:42px'>✅ MEAL APPROVED</h1>"
 
                     + photo
 
@@ -2324,13 +2627,16 @@ def admin_scanner():
 
             }} else {{
 
+                sound(false);
+                const alreadyUsed = (data.message || '').toLowerCase().includes('already used');
+
                 document.getElementById(
                     "result"
                 ).innerHTML =
 
                     "<div class='message error'>"
 
-                    + "<h2>❌ COUPON REJECTED</h2>"
+                    + "<h1 style='font-size:42px'>❌ " + (alreadyUsed ? "ALREADY USED" : "COUPON REJECTED") + "</h1>"
 
                     + "<p>"
                     + data.message
@@ -2420,6 +2726,9 @@ def admin_records():
         )
 
     records = all_records()
+    if admin_scope_gender():
+        allowed = {s["student_uid"] for s in list_student_records(gender=admin_scope_gender())}
+        records = [r for r in records if r.get("student_uid") in allowed]
 
     rows = ""
 

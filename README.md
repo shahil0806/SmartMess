@@ -2,6 +2,17 @@
 
 Premium hostel mess coupon and attendance system built with Flask, MongoDB Atlas and secure one-time QR coupons.
 
+## Phase 3 Premium Features
+
+- Professional Excel and PDF attendance reports with date, gender, meal and student filters
+- 7-day and 30-day dashboard charts, absent count and skipped-meal count
+- Large scanner verification photo, MEAL APPROVED / ALREADY USED display and sound alerts
+- Daily breakfast, lunch and dinner menu plus student notice management
+- Student monthly meal history and today/tomorrow skip-meal option
+- Main Admin, Boys Hostel Admin, Girls Hostel Admin and Scanner Operator roles
+
+The existing `ADMIN_PASSWORD` remains the Main Admin password. Main Admin can create the other role accounts from **Admin Roles**.
+
 ## Phase 1 features
 
 - Registration Number based student verification
