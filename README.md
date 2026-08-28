@@ -5,6 +5,7 @@ Premium hostel mess coupon and attendance system built with Flask, MongoDB Atlas
 ## Phase 3 Premium Features
 
 - Professional Excel and PDF attendance reports with date, gender, meal and student filters
+- White professional report header with Government Polytechnic, Barh name and official college logo
 - 7-day and 30-day dashboard charts, absent count and skipped-meal count
 - Large scanner verification photo, MEAL APPROVED / ALREADY USED display and sound alerts
 - Daily breakfast, lunch and dinner menu plus student notice management

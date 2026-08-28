@@ -28,13 +28,14 @@ import requests
 from markupsafe import escape
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 
 try:
     from pymongo import MongoClient, ASCENDING, ReturnDocument
@@ -71,6 +72,8 @@ BRANCHES = [
 HOSTEL_BLOCKS = ["BH-1", "BH-2"]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COLLEGE_NAME = "Government Polytechnic, Barh"
+COLLEGE_LOGO = os.path.join(BASE_DIR, "college_logo.jpg")
 DB_FILE = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "smart_mess.db"))
 MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
 MONGODB_DB = os.environ.get("MONGODB_DB", "smartmess").strip() or "smartmess"
@@ -2397,8 +2400,16 @@ def admin_report_download():
         buffer = BytesIO(); doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10*mm, leftMargin=10*mm, topMargin=12*mm, bottomMargin=12*mm)
         styles = getSampleStyleSheet()
         title_style = ParagraphStyle("SmartMessTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=colors.HexColor("#102b4f"), spaceAfter=8)
+        college_style = ParagraphStyle("CollegeTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=colors.HexColor("#102b4f"), alignment=1)
         body_style = ParagraphStyle("SmartMessBody", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12)
-        story = [Paragraph(title, title_style), Paragraph(f"Total attendance records: {len(rows)}", body_style), Spacer(1, 10)]
+        if os.path.exists(COLLEGE_LOGO):
+            logo = RLImage(COLLEGE_LOGO, width=22*mm, height=22*mm)
+            college_header = Table([[logo, Paragraph(COLLEGE_NAME, college_style)]], colWidths=[28*mm, 235*mm])
+            college_header.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(1,0),(1,0),"CENTER"),("BOX",(0,0),(-1,-1),.7,colors.HexColor("#dbe3ee")),("BACKGROUND",(0,0),(-1,-1),colors.white),("PADDING",(0,0),(-1,-1),7)]))
+            story = [college_header, Spacer(1, 10)]
+        else:
+            story = [Paragraph(COLLEGE_NAME, college_style), Spacer(1, 8)]
+        story += [Paragraph(title, title_style), Paragraph(f"Total attendance records: {len(rows)}", body_style), Spacer(1, 10)]
         table = Table([headers] + rows, repeatRows=1, colWidths=[23*mm,19*mm,33*mm,31*mm,18*mm,29*mm,25*mm,16*mm,16*mm,22*mm])
         table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#102b4f")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#cbd5e1")),
@@ -2406,17 +2417,20 @@ def admin_report_download():
         story.append(table); doc.build(story); buffer.seek(0)
         return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=f"SmartMess_Report_{start}_{end}.pdf")
     wb = Workbook(); ws = wb.active; ws.title = "Attendance"
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers)); ws["A1"] = title
-    ws["A1"].font = Font(size=18, bold=True, color="FFFFFF"); ws["A1"].fill = PatternFill("solid", fgColor="102B4F"); ws["A1"].alignment = Alignment(horizontal="center")
-    ws.append([f"Total records: {len(rows)}"]); ws.append([]); ws.append(headers)
-    for cell in ws[4]: cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="2563EB")
+    ws.merge_cells("B1:J1"); ws["B1"] = COLLEGE_NAME; ws["B1"].font = Font(size=20, bold=True, color="102B4F"); ws["B1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells("B2:J2"); ws["B2"] = title; ws["B2"].font = Font(size=15, bold=True, color="FFFFFF"); ws["B2"].fill = PatternFill("solid", fgColor="102B4F"); ws["B2"].alignment = Alignment(horizontal="center")
+    ws["A3"] = f"Total records: {len(rows)}"; ws.append([]); ws.append(headers)
+    if os.path.exists(COLLEGE_LOGO):
+        logo = XLImage(COLLEGE_LOGO); logo.width = 62; logo.height = 62; ws.add_image(logo, "A1")
+    ws.row_dimensions[1].height = 48; ws.row_dimensions[2].height = 25
+    for cell in ws[5]: cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="2563EB")
     for row in rows: ws.append(row)
     thin = Side(style="thin", color="D9E2F0")
-    for row in ws.iter_rows(min_row=4):
+    for row in ws.iter_rows(min_row=5):
         for cell in row: cell.border = Border(bottom=thin); cell.alignment = Alignment(vertical="center")
     widths = [13,11,24,21,12,25,20,12,12,15]
     for i, width in enumerate(widths, 1): ws.column_dimensions[get_column_letter(i)].width = width
-    ws.freeze_panes = "A5"; ws.auto_filter.ref = f"A4:J{max(4, ws.max_row)}"
+    ws.freeze_panes = "A6"; ws.auto_filter.ref = f"A5:J{max(5, ws.max_row)}"
     buffer = BytesIO(); wb.save(buffer); buffer.seek(0)
     return send_file(buffer, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name=f"SmartMess_Report_{start}_{end}.xlsx")
 
