@@ -898,8 +898,9 @@ PWA_SCRIPT='''<script>if('serviceWorker' in navigator)navigator.serviceWorker.re
 DASHBOARD_CSS="""
 <style>
 .dash{min-height:100vh;background:#f7faff;color:#0b1838}.dash *{box-sizing:border-box}.side{position:fixed;inset:0 auto 0 0;width:250px;padding:22px 14px;background:linear-gradient(180deg,#06235c,#031b4c);color:#fff;z-index:30;overflow:auto}.brand{display:flex;gap:12px;align-items:center;padding:0 8px 18px;border-bottom:1px solid rgba(255,255,255,.14)}.brand img{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#fff}.brand b{font-size:15px;line-height:1.35}.side-title{font-size:24px;font-weight:800;color:#19a7ff;padding:20px 10px}.side a{display:flex;align-items:center;gap:12px;color:#e8f1ff;text-decoration:none;padding:13px 15px;margin:5px 0;border-radius:9px;font-weight:600}.side a:hover,.side a.on{background:linear-gradient(135deg,#0568ff,#138cff);color:#fff}.side-foot{margin-top:30px;border:1px solid rgba(255,255,255,.18);padding:14px;border-radius:12px;line-height:1.7}.dash-main{margin-left:250px;min-height:100vh}.dash-top{height:72px;background:linear-gradient(90deg,#082e78,#021d55);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 30px;position:sticky;top:0;z-index:20}.dash-top h1{font-size:23px;color:#fff;margin:0}.dash-content{padding:24px 28px}.welcome{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}.welcome h2{margin:0 0 5px;font-size:25px}.date-pill{border:1px solid #d7e2f3;background:#fff;border-radius:10px;padding:11px 16px}.metric-row{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.metric-row.small{grid-template-columns:repeat(5,1fr);margin-top:18px}.dmetric{background:#fff;border:1px solid #dce6f5;border-radius:12px;padding:18px;display:flex;gap:16px;align-items:center;box-shadow:0 4px 16px rgba(22,58,117,.05);min-width:0}.micon{width:58px;height:58px;border-radius:12px;display:grid;place-items:center;background:#e7efff;font-size:28px;flex:none}.dmetric strong{display:block;font-size:28px;margin:3px 0}.dmetric small{color:#60708d}.panel-grid{display:grid;grid-template-columns:1.45fr 1fr 1fr;gap:16px;margin-top:18px}.dpanel{background:#fff;border:1px solid #dce6f5;border-radius:12px;padding:18px;box-shadow:0 4px 16px rgba(22,58,117,.05)}.dpanel h3{margin:0 0 16px}.activity{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #edf1f7}.activity:last-child{border:0}.quick{display:grid;grid-template-columns:repeat(5,1fr);gap:16px}.quick a{border:1px solid #dbe5f4;border-radius:10px;padding:16px;text-decoration:none;color:#0b3f9e;background:#fff;font-weight:700}.quick a:first-child{background:#0753cf;color:#fff}.student-layout .metric-row{grid-template-columns:2fr 1fr}.profile-box{align-items:flex-start}.profile-box img{width:122px;height:122px;border-radius:9px;object-fit:cover;background:#e7edf5}.coupon-call{background:linear-gradient(135deg,#0753cf,#087cef);color:#fff;border-radius:12px;padding:26px;display:flex;align-items:center;gap:18px}.coupon-call .fakeqr{font-size:58px;background:#fff;padding:14px;border-radius:15px}.coupon-call h2{color:#fff}.coupon-call .btn{background:#fff;color:#0753cf}.menu-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.menu-card{border:1px solid #dce6f5;border-radius:11px;padding:18px;min-height:150px}.menu-card:nth-child(1){background:#f1fcf5}.menu-card:nth-child(2){background:#f3f8ff}.menu-card:nth-child(3){background:#faf5ff}.student-lower{display:grid;grid-template-columns:1.25fr 1.2fr 1fr;gap:16px;margin-top:18px}.notice-bar{margin-top:16px;border:1px solid #f5b83b;background:#fffaf0;border-radius:10px;padding:13px 18px}.status-open{color:#069447;background:#dcf8e8;padding:5px 10px;border-radius:20px;font-weight:700}.status-closed{color:#596477;background:#edf0f4;padding:5px 10px;border-radius:20px;font-weight:700}.mobile-nav{display:none}
+.login-page{min-height:100vh;background:#f4f8ff;display:grid;place-items:center;padding:28px}.login-shell{width:min(1120px,100%);min-height:660px;display:grid;grid-template-columns:44% 56%;background:#fff;border:1px solid #dce6f5;border-radius:24px;overflow:hidden;box-shadow:0 24px 70px rgba(5,35,92,.16)}.login-hero{position:relative;padding:38px;color:#fff;background:linear-gradient(145deg,#031d50,#063b94 67%,#0878e7);display:flex;flex-direction:column;overflow:hidden}.login-hero:after{content:"";position:absolute;width:370px;height:370px;border:70px solid rgba(11,142,255,.14);border-radius:50%;right:-260px;top:120px}.login-logo{display:flex;align-items:center;gap:14px;position:relative;z-index:1}.login-logo img{width:68px;height:68px;border-radius:50%;object-fit:cover;background:#fff;padding:3px}.login-logo strong{display:block;font-size:18px;line-height:1.3}.login-logo span{display:block;color:#bdddff;font-size:13px;margin-top:3px}.login-hero-content{position:relative;z-index:1;margin:auto 0}.login-hero-content h1{color:#fff;font-size:40px;margin:0 0 10px}.login-hero-content>p{color:#cfe3ff;font-size:17px}.login-features{display:grid;gap:14px;margin-top:30px}.login-feature{display:flex;align-items:center;gap:13px;font-weight:650}.login-feature i{font-style:normal;width:38px;height:38px;display:grid;place-items:center;border:1px solid #1598ff;border-radius:10px;color:#43c8ff}.login-building{font-size:12px;letter-spacing:3px;color:#8fc9ff;opacity:.7;margin-top:auto;position:relative;z-index:1}.login-pane{padding:50px;display:flex;align-items:center;background:radial-gradient(circle at 100% 0,#eaf4ff 0,transparent 38%),#fbfdff}.login-box{width:100%;max-width:450px;margin:auto}.login-box h2{text-align:center;font-size:31px;margin:0 0 7px}.login-box .sub{text-align:center;color:#667590;margin:0 0 24px}.login-tabs{display:grid;grid-template-columns:1fr 1fr;background:#f1f5fb;border:1px solid #dce4f0;border-radius:10px;overflow:hidden;margin-bottom:24px}.login-tabs a{text-align:center;padding:13px;color:#344158;text-decoration:none;font-weight:800}.login-tabs a.on{color:#fff;background:linear-gradient(135deg,#0760e9,#0a86f5)}.field-wrap{position:relative}.field-wrap input{padding-right:52px}.eye-btn{position:absolute;right:7px;top:7px;width:42px;height:42px;border:0;background:transparent;cursor:pointer;font-size:18px;border-radius:8px}.eye-btn:hover{background:#eaf2ff}.login-primary{width:100%;border:0;border-radius:10px;background:linear-gradient(135deg,#0753cf,#078bf0);color:#fff;padding:15px;font-size:16px;font-weight:800;cursor:pointer;box-shadow:0 10px 22px rgba(7,83,207,.2)}.login-primary:hover{filter:brightness(1.06)}.login-help{text-align:center;margin-top:17px}.login-help a{font-weight:700;color:#0753cf}.security-note{display:flex;gap:11px;align-items:center;margin-top:25px;padding:15px;border-top:1px solid #e1e8f2;color:#60708b;font-size:13px;line-height:1.45}.security-note b{font-size:25px;color:#0872e5}
 @media(max-width:1050px){.metric-row.small{grid-template-columns:repeat(3,1fr)}.panel-grid,.student-lower{grid-template-columns:1fr}.quick{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:760px){.side{display:none}.dash-main{margin-left:0}.dash-top{padding:0 15px}.dash-top h1{font-size:18px}.dash-content{padding:15px}.metric-row,.metric-row.small,.student-layout .metric-row,.menu-grid{grid-template-columns:1fr}.welcome{align-items:flex-start;gap:12px}.date-pill{font-size:12px}.mobile-nav{display:block}.profile-box{flex-direction:column}.quick{grid-template-columns:1fr}}
+@media(max-width:760px){.side{display:none}.dash-main{margin-left:0}.dash-top{padding:0 15px}.dash-top h1{font-size:18px}.dash-content{padding:15px}.metric-row,.metric-row.small,.student-layout .metric-row,.menu-grid{grid-template-columns:1fr}.welcome{align-items:flex-start;gap:12px}.date-pill{font-size:12px}.mobile-nav{display:block}.profile-box{flex-direction:column}.quick{grid-template-columns:1fr}.login-page{padding:12px}.login-shell{grid-template-columns:1fr;border-radius:18px}.login-hero{padding:22px;min-height:210px}.login-logo img{width:52px;height:52px}.login-logo strong{font-size:15px}.login-hero-content{margin:24px 0 0}.login-hero-content h1{font-size:28px}.login-hero-content>p{font-size:14px}.login-features,.login-building{display:none}.login-pane{padding:28px 22px}.login-box h2{font-size:26px}}
 </style>
 """
 
@@ -971,51 +972,10 @@ def admin_login():
             attempts=auth_fail(key); error = "Wrong username or password."
             log_activity("ADMIN_LOGIN_FAILED",f"Username: {username}; attempt {attempts}",actor=username,role="UNKNOWN")
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Admin Login</title>
-        {CSS}{PWA_HEAD}
-    </head>
-
-    <body>
-    <div class="container">
-
-        <div class="card" style="max-width:500px;margin:80px auto;">
-
-            <h1>🔐 Admin Login</h1>
-
-            {'<div class="message error">' + error + '</div>'
-             if error else ''}
-
-            <form method="POST">
-
-                <label>Username</label>
-                <input name="username" value="main" required>
-
-                <label>Password</label>
-
-                <input
-                    type="password"
-                    name="password"
-                    required
-                >
-
-                <button class="btn" type="submit">
-                    Login
-                </button>
-
-                <a href="/admin/forgot-password" style="display:block;margin-top:18px">Forgot Password?</a>
-
-            </form>
-
-        </div>
-
-    </div>
-    </body>
-    </html>
-    """
+    html = f"""<!doctype html><html><head><title>Admin Login | SmartMess</title>{CSS}{DASHBOARD_CSS}{PWA_HEAD}</head><body class="login-page">
+    <main class="login-shell"><section class="login-hero"><div class="login-logo"><img src="/static/icon-192.png" alt="College logo"><div><strong>Government Polytechnic, Barh</strong><span>SmartMess Management System</span></div></div><div class="login-hero-content"><h1>SmartMess</h1><p>Smart Mess Management System</p><div class="login-features"><div class="login-feature"><i>▦</i> Secure QR Coupons</div><div class="login-feature"><i>✓</i> Meal Attendance</div><div class="login-feature"><i>▤</i> Reports &amp; Records</div></div></div><div class="login-building">GOVERNMENT POLYTECHNIC · BARH</div></section>
+    <section class="login-pane"><div class="login-box"><h2>Welcome to SmartMess</h2><p class="sub">Sign in to continue</p><nav class="login-tabs"><a href="/student">♙ Student</a><a class="on" href="/admin">♢ Admin</a></nav>{'<div class="message error">' + escape(error) + '</div>' if error else ''}<form method="post"><label>Username</label><input name="username" value="main" autocomplete="username" required><label>Password</label><div class="field-wrap"><input id="loginSecret" type="password" name="password" autocomplete="current-password" required><button type="button" class="eye-btn" onclick="toggleSecret()" aria-label="Show password">👁</button></div><button class="login-primary" type="submit">🔒 Login to Dashboard</button></form><div class="login-help"><a href="/admin/forgot-password">Forgot Password?</a></div><div class="security-note"><b>♢</b><span>Your session is protected and admin activity is securely recorded.</span></div></div></section></main>
+    <script>function toggleSecret(){{const x=document.getElementById('loginSecret');x.type=x.type==='password'?'text':'password'}};</script>{PWA_SCRIPT}</body></html>"""
 
     return html
 
@@ -1784,77 +1744,10 @@ def student_home():
     # Student session is not required permanently.
     # Registration number verification is done before coupon generation.
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-
-        <title>Student Panel</title>
-
-        {CSS}
-
-    </head>
-
-    <body>
-
-    <div class="container">
-
-        <div class="card" style="max-width:650px;margin:40px auto;">
-
-            <div class="center">
-
-                <h1>🍽️ Smart Mess Student Panel</h1>
-
-                <p>
-                    Registration Number aur 4-digit PIN se login kare.
-                </p>
-
-            </div>
-
-            <form method="POST" action="/student/verify">
-
-                <label>Registration Number</label>
-
-                <input
-                    type="text"
-                    name="roll_number"
-                    placeholder="Enter your Registration Number"
-                    required
-                >
-
-                <label>4-digit PIN</label>
-                <input
-                    type="password"
-                    name="pin"
-                    inputmode="numeric"
-                    minlength="4"
-                    maxlength="4"
-                    pattern="[0-9]{{4}}"
-                    placeholder="Enter your 4-digit PIN"
-                    required
-                >
-
-                <button class="btn blue" type="submit">
-                    Verify Student
-                </button>
-                <a href="/student/forgot-pin" style="display:block;margin-top:18px">Forgot PIN?</a>
-
-            </form>
-
-            <hr style="margin:25px 0;">
-
-            <p class="center">
-                Outside / unregistered student ko coupon
-                generate nahi hoga.
-            </p>
-
-        </div>
-
-    </div>
-
-    </body>
-    </html>
-    """
+    html = f"""<!doctype html><html><head><title>Student Login | SmartMess</title>{CSS}{DASHBOARD_CSS}{PWA_HEAD}</head><body class="login-page">
+    <main class="login-shell"><section class="login-hero"><div class="login-logo"><img src="/static/icon-192.png" alt="College logo"><div><strong>Government Polytechnic, Barh</strong><span>SmartMess Management System</span></div></div><div class="login-hero-content"><h1>SmartMess</h1><p>Smart Mess Management System</p><div class="login-features"><div class="login-feature"><i>▦</i> Secure QR Coupons</div><div class="login-feature"><i>✓</i> Meal Attendance</div><div class="login-feature"><i>▤</i> Reports &amp; Records</div></div></div><div class="login-building">GOVERNMENT POLYTECHNIC · BARH</div></section>
+    <section class="login-pane"><div class="login-box"><h2>Welcome to SmartMess</h2><p class="sub">Sign in to continue</p><nav class="login-tabs"><a class="on" href="/student">♙ Student</a><a href="/admin">♢ Admin</a></nav><form method="post" action="/student/verify"><label>Registration Number</label><input name="roll_number" placeholder="Enter your registration number" autocomplete="username" required><label>4-digit PIN</label><div class="field-wrap"><input id="loginSecret" type="password" name="pin" inputmode="numeric" minlength="4" maxlength="4" pattern="[0-9]{{4}}" placeholder="Enter 4-digit PIN" autocomplete="current-password" required><button type="button" class="eye-btn" onclick="toggleSecret()" aria-label="Show PIN">👁</button></div><button class="login-primary" type="submit">🔒 Login to Dashboard</button></form><div class="login-help"><a href="/student/forgot-pin">Forgot PIN?</a></div><div class="security-note"><b>♢</b><span>Only registered and active hostel students can access meal coupons.</span></div></div></section></main>
+    <script>function toggleSecret(){{const x=document.getElementById('loginSecret');x.type=x.type==='password'?'text':'password'}};</script>{PWA_SCRIPT}</body></html>"""
 
     return html
 
