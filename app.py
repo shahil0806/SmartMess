@@ -133,7 +133,6 @@ def init_db():
         mongo_database.complaints.create_index([("student_uid", ASCENDING), ("created_at", ASCENDING)])
         mongo_database.pin_requests.create_index([("student_uid", ASCENDING), ("status", ASCENDING)])
         mongo_database.activity_logs.create_index([("created_at", ASCENDING)])
-        mongo_database.auth_attempts.create_index([("_id", ASCENDING)], unique=True)
         for key, value in defaults.items():
             mongo_database.settings.update_one({"_id": key}, {"$setOnInsert": {"value": value}}, upsert=True)
         for student in mongo_database.students.find({"$or": [{"pin_hash": {"$exists": False}}, {"pin_hash": ""}]}):
