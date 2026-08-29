@@ -895,6 +895,14 @@ tr:hover td { background:#f8fbff; }
 PWA_HEAD='''<link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#081b33">'''
 PWA_SCRIPT='''<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js');let deferredPrompt;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;document.querySelectorAll('.install-pwa').forEach(b=>b.style.display='inline-block')});async function installSmartMess(){if(deferredPrompt){deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null}}</script>'''
 
+DASHBOARD_CSS="""
+<style>
+.dash{min-height:100vh;background:#f7faff;color:#0b1838}.dash *{box-sizing:border-box}.side{position:fixed;inset:0 auto 0 0;width:250px;padding:22px 14px;background:linear-gradient(180deg,#06235c,#031b4c);color:#fff;z-index:30;overflow:auto}.brand{display:flex;gap:12px;align-items:center;padding:0 8px 18px;border-bottom:1px solid rgba(255,255,255,.14)}.brand img{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#fff}.brand b{font-size:15px;line-height:1.35}.side-title{font-size:24px;font-weight:800;color:#19a7ff;padding:20px 10px}.side a{display:flex;align-items:center;gap:12px;color:#e8f1ff;text-decoration:none;padding:13px 15px;margin:5px 0;border-radius:9px;font-weight:600}.side a:hover,.side a.on{background:linear-gradient(135deg,#0568ff,#138cff);color:#fff}.side-foot{margin-top:30px;border:1px solid rgba(255,255,255,.18);padding:14px;border-radius:12px;line-height:1.7}.dash-main{margin-left:250px;min-height:100vh}.dash-top{height:72px;background:linear-gradient(90deg,#082e78,#021d55);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 30px;position:sticky;top:0;z-index:20}.dash-top h1{font-size:23px;color:#fff;margin:0}.dash-content{padding:24px 28px}.welcome{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}.welcome h2{margin:0 0 5px;font-size:25px}.date-pill{border:1px solid #d7e2f3;background:#fff;border-radius:10px;padding:11px 16px}.metric-row{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.metric-row.small{grid-template-columns:repeat(5,1fr);margin-top:18px}.dmetric{background:#fff;border:1px solid #dce6f5;border-radius:12px;padding:18px;display:flex;gap:16px;align-items:center;box-shadow:0 4px 16px rgba(22,58,117,.05);min-width:0}.micon{width:58px;height:58px;border-radius:12px;display:grid;place-items:center;background:#e7efff;font-size:28px;flex:none}.dmetric strong{display:block;font-size:28px;margin:3px 0}.dmetric small{color:#60708d}.panel-grid{display:grid;grid-template-columns:1.45fr 1fr 1fr;gap:16px;margin-top:18px}.dpanel{background:#fff;border:1px solid #dce6f5;border-radius:12px;padding:18px;box-shadow:0 4px 16px rgba(22,58,117,.05)}.dpanel h3{margin:0 0 16px}.activity{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #edf1f7}.activity:last-child{border:0}.quick{display:grid;grid-template-columns:repeat(5,1fr);gap:16px}.quick a{border:1px solid #dbe5f4;border-radius:10px;padding:16px;text-decoration:none;color:#0b3f9e;background:#fff;font-weight:700}.quick a:first-child{background:#0753cf;color:#fff}.student-layout .metric-row{grid-template-columns:2fr 1fr}.profile-box{align-items:flex-start}.profile-box img{width:122px;height:122px;border-radius:9px;object-fit:cover;background:#e7edf5}.coupon-call{background:linear-gradient(135deg,#0753cf,#087cef);color:#fff;border-radius:12px;padding:26px;display:flex;align-items:center;gap:18px}.coupon-call .fakeqr{font-size:58px;background:#fff;padding:14px;border-radius:15px}.coupon-call h2{color:#fff}.coupon-call .btn{background:#fff;color:#0753cf}.menu-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.menu-card{border:1px solid #dce6f5;border-radius:11px;padding:18px;min-height:150px}.menu-card:nth-child(1){background:#f1fcf5}.menu-card:nth-child(2){background:#f3f8ff}.menu-card:nth-child(3){background:#faf5ff}.student-lower{display:grid;grid-template-columns:1.25fr 1.2fr 1fr;gap:16px;margin-top:18px}.notice-bar{margin-top:16px;border:1px solid #f5b83b;background:#fffaf0;border-radius:10px;padding:13px 18px}.status-open{color:#069447;background:#dcf8e8;padding:5px 10px;border-radius:20px;font-weight:700}.status-closed{color:#596477;background:#edf0f4;padding:5px 10px;border-radius:20px;font-weight:700}.mobile-nav{display:none}
+@media(max-width:1050px){.metric-row.small{grid-template-columns:repeat(3,1fr)}.panel-grid,.student-lower{grid-template-columns:1fr}.quick{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:760px){.side{display:none}.dash-main{margin-left:0}.dash-top{padding:0 15px}.dash-top h1{font-size:18px}.dash-content{padding:15px}.metric-row,.metric-row.small,.student-layout .metric-row,.menu-grid{grid-template-columns:1fr}.welcome{align-items:flex-start;gap:12px}.date-pill{font-size:12px}.mobile-nav{display:block}.profile-box{flex-direction:column}.quick{grid-template-columns:1fr}}
+</style>
+"""
+
 
 # =========================================================
 # ROOT
@@ -1224,127 +1232,35 @@ def admin_dashboard():
     absent = max(student_count - len(present_uids), 0)
     skipped = len(list_skips(start_date=today, end_date=today))
     chart7 = json.dumps(daily_meal_series(7, scope_gender))
-    chart30 = json.dumps(daily_meal_series(30, scope_gender))
     database_label = "MongoDB Atlas (Permanent)" if USE_MONGO else "SQLite (Local)"
+    total_meals = breakfast + lunch + dinner
+    recent_html = "".join(
+        f'<div class="activity"><span>✅</span><div><b>{escape(item.get("action", "Activity").replace("_", " ").title())}</b><br><small>{escape(item.get("details", "") or "SmartMess update")} · {escape(item.get("created_at", ""))}</small></div></div>'
+        for item in list_activity(5)
+    ) or '<div class="activity"><span>ℹ️</span><div><b>No recent activity</b><br><small>New activity will appear here.</small></div></div>'
+    role_label = {"MAIN":"Super Administrator","BOYS":"Boys Hostel Admin","GIRLS":"Girls Hostel Admin"}.get(session.get("admin_role"),"Administrator")
+    date_label = current_time().strftime("%d %b %Y, %A")
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Admin Dashboard</title>
-        {CSS}{PWA_HEAD}
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    </head>
-
-    <body><div class="phase4-shell">
-    <aside class="phase4-side"><h2>🍽️ SmartMess</h2><p style="color:#93c5fd">{escape(session.get('admin_role','MAIN').title())} Admin</p><nav><a href="/admin/dashboard">▦ Overview</a><a href="/admin/students">👥 Students</a><a href="/admin/scanner">▣ QR Scanner</a><a href="/admin/reports">▤ Reports</a><a href="/admin/weekly-menu">▦ Weekly Menu</a><a href="/admin/complaints">💬 Feedback</a><a href="/admin/pin-requests">🔑 PIN Requests</a><a href="/admin/logout">↪ Logout</a></nav></aside>
-    <main class="phase4-main"><div class="container" style="width:100%;margin:0;max-width:none">
-
-        <h1>🍽️ Smart Mess Admin Panel</h1>
-
-        <div class="nav">
-
-            <a class="btn" href="/admin/dashboard">
-                Dashboard
-            </a>
-
-            <a class="btn green" href="/admin/add-student">
-                ➕ Register Student
-            </a>
-
-            <a class="btn blue" href="/admin/students">
-                👨‍🎓 Students
-            </a>
-
-            <a class="btn" href="/admin/scanner">
-                📷 Scanner
-            </a>
-
-            <a class="btn gray" href="/admin/records">
-                📊 Records
-            </a>
-
-            <a class="btn blue" href="/admin/reports">📥 Reports</a>
-            <a class="btn green" href="/admin/menu-notice">📋 Menu & Notice</a>
-            <a class="btn blue" href="/admin/weekly-menu">📅 Weekly Menu</a>
-            <a class="btn blue" href="/admin/complaints">💬 Feedback</a>
-            <a class="btn gray" href="/admin/pin-requests">🔑 PIN Requests</a>
-            {'<a class="btn gray" href="/admin/roles">🔐 Admin Roles</a>' if admin_required(['MAIN']) else ''}
-            {'<a class="btn gray" href="/admin/activity-log">🛡️ Activity Log</a>' if admin_required(['MAIN']) else ''}
-
-            <a class="btn green" href="/admin/meal-settings">
-                ⏰ Meal Settings
-            </a>
-
-            <a class="btn red" href="/admin/logout">
-                Logout
-            </a>
-            <button class="install-pwa" style="display:none" onclick="installSmartMess()">📲 Install App</button>
-
-        </div>
-
-        <div class="grid">
-
-            <div class="stat">
-                <div>Hostel Students</div>
-                <h2>{student_count}</h2>
-            </div>
-
-            <div class="stat">
-                <div>👦 Boys</div>
-                <h2>{boys_count}</h2>
-            </div>
-
-            <div class="stat">
-                <div>👧 Girls</div>
-                <h2>{girls_count}</h2>
-            </div>
-
-            <div class="stat"><div>🏢 BH-1 Students</div><h2>{bh1_count}</h2></div>
-            <div class="stat"><div>🏢 BH-2 Students</div><h2>{bh2_count}</h2></div>
-
-            <div class="stat">
-                <div>Breakfast Today</div>
-                <h2>{breakfast}</h2>
-            </div>
-
-            <div class="stat">
-                <div>Lunch Today</div>
-                <h2>{lunch}</h2>
-            </div>
-
-            <div class="stat">
-                <div>Dinner Today</div>
-                <h2>{dinner}</h2>
-            </div>
-
-            <div class="stat"><div>Absent Today</div><h2>{absent}</h2></div>
-            <div class="stat"><div>Skipped Today</div><h2>{skipped}</h2></div>
-
-            <div class="stat">
-                <div>Database</div>
-                <h2 style="font-size:20px;">{database_label}</h2>
-            </div>
-
-        </div>
-
-        <div class="grid">
-          <div class="card"><h2>Last 7 Days</h2><canvas id="chart7"></canvas></div>
-          <div class="card"><h2>Last 30 Days</h2><canvas id="chart30"></canvas></div>
-        </div>
-
-    </div></main></div>
-    <script>
-    function draw(id, data) {{ new Chart(document.getElementById(id), {{type:'line',data:{{labels:data.labels,datasets:[
-      {{label:'Breakfast',data:data.breakfast,borderColor:'#f59e0b',tension:.35}},
-      {{label:'Lunch',data:data.lunch,borderColor:'#0ea5e9',tension:.35}},
-      {{label:'Dinner',data:data.dinner,borderColor:'#8b5cf6',tension:.35}}
-    ]}},options:{{responsive:true,plugins:{{legend:{{position:'bottom'}}}},scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}}}}}}}}); }}
-    draw('chart7', {chart7}); draw('chart30', {chart30});
-    </script>
-    {PWA_SCRIPT}</body>
-    </html>
-    """
+    html = f"""<!doctype html><html><head><title>Admin Dashboard</title>{CSS}{DASHBOARD_CSS}{PWA_HEAD}<script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body class="dash">
+    <aside class="side"><div class="brand"><img src="/static/icon-192.png"><b>{COLLEGE_NAME}</b></div><div class="side-title">🍽️ SmartMess</div><nav>
+      <a class="on" href="/admin/dashboard">▦ Admin Dashboard</a><a href="/admin/scanner">▣ Scanner</a><a href="/admin/students">♙ Students</a><a href="/admin/meal-settings">♨ Meal Settings</a><a href="/admin/weekly-menu">▦ Weekly Menu</a><a href="/admin/reports">▤ Reports</a><a href="/admin/complaints">◉ Complaints</a>{'<a href="/admin/activity-log">▣ Activity Log</a><a href="/admin/roles">⚙ Admin Roles</a>' if admin_required(['MAIN']) else ''}<a href="/admin/logout">↪ Logout</a></nav><div class="side-foot">📅 Today<br><b>{date_label}</b></div></aside>
+    <main class="dash-main"><header class="dash-top"><h1>Admin Dashboard</h1><div>🔔 &nbsp; 👤 <b>{escape(session.get('admin_username','Admin')).title()}</b><br><small>{role_label}</small></div></header><div class="dash-content">
+      <section class="welcome"><div><h2>Welcome back, Admin! 👋</h2><span>Here's what's happening in your mess today.</span></div><div class="date-pill">📅 {date_label}</div></section>
+      <section class="metric-row">
+       <div class="dmetric"><span class="micon">♙</span><div>Total Students<strong>{student_count}</strong><small>Across all hostels</small></div></div>
+       <div class="dmetric"><span class="micon">♂</span><div>Boys Hostel<strong>{boys_count}</strong><small>{round((boys_count/student_count*100),1) if student_count else 0}% of total</small></div></div>
+       <div class="dmetric"><span class="micon" style="background:#ffe3ef">♀</span><div>Girls Hostel<strong>{girls_count}</strong><small>{round((girls_count/student_count*100),1) if student_count else 0}% of total</small></div></div>
+      </section>
+      <section class="metric-row small">
+       <div class="dmetric"><span class="micon">☕</span><div>Breakfast Today<strong>{breakfast}</strong></div></div><div class="dmetric"><span class="micon">🍲</span><div>Lunch Today<strong>{lunch}</strong></div></div><div class="dmetric"><span class="micon">🍚</span><div>Dinner Today<strong>{dinner}</strong></div></div><div class="dmetric"><span class="micon">♙</span><div>Absent Today<strong>{absent}</strong></div></div><div class="dmetric"><span class="micon">⏭</span><div>Skipped Meals<strong>{skipped}</strong></div></div>
+      </section>
+      <section class="panel-grid"><div class="dpanel"><h3>Meal Attendance (Last 7 Days)</h3><canvas id="chart7"></canvas></div><div class="dpanel"><h3>Meal Distribution Today</h3><canvas id="donut"></canvas><p class="center"><b>{total_meals}</b> total meals</p></div><div class="dpanel"><h3>Recent Activity</h3>{recent_html}</div></section>
+      <section class="dpanel" style="margin-top:18px"><h3>Quick Actions</h3><div class="quick"><a href="/admin/scanner">▣ QR Scan<br><small>Scan student QR</small></a><a href="/admin/students">♙ Students<br><small>Manage records</small></a><a href="/admin/weekly-menu">▦ Weekly Menu<br><small>Manage menu</small></a><a href="/admin/reports">▤ Reports<br><small>Attendance reports</small></a><a href="/admin/complaints">◉ Complaints<br><small>View & resolve</small></a></div></section>
+      <p style="text-align:right;color:#60708d">{database_label}</p>
+    </div></main><script>
+    const c7={chart7};new Chart(document.getElementById('chart7'),{{type:'line',data:{{labels:c7.labels,datasets:[{{label:'Breakfast',data:c7.breakfast,borderColor:'#05aeba',backgroundColor:'transparent',tension:.35}},{{label:'Lunch',data:c7.lunch,borderColor:'#28a745',backgroundColor:'transparent',tension:.35}},{{label:'Dinner',data:c7.dinner,borderColor:'#7c4dff',backgroundColor:'transparent',tension:.35}}]}},options:{{responsive:true,plugins:{{legend:{{position:'top'}}}},scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}}}}}}}});
+    new Chart(document.getElementById('donut'),{{type:'doughnut',data:{{labels:['Breakfast','Lunch','Dinner'],datasets:[{{data:[{breakfast},{lunch},{dinner}],backgroundColor:['#09b7c4','#38aa43','#8453ed']}}]}},options:{{cutout:'65%',plugins:{{legend:{{position:'right'}}}}}}}});
+    </script>{PWA_SCRIPT}</body></html>"""
 
     return html
 
@@ -2070,156 +1986,42 @@ def student_meals():
     notice = get_setting("student_notice", "")
     tomorrow = (current_time().date() + timedelta(days=1)).isoformat()
     skip_rows=""
-    for sk in list_skips(student_uid,today,tomorrow):
+    active_skips=list_skips(student_uid,today,tomorrow)
+    for sk in active_skips:
         can_cancel=sk['skip_date']>today or current_time().strftime('%H:%M')<get_setting(sk['meal'].lower()+'_start','00:00')
         action=f'''<form method="post" action="/student/cancel-skip"><input type="hidden" name="meal" value="{sk['meal']}"><input type="hidden" name="skip_date" value="{sk['skip_date']}"><button class="btn gray">Cancel Skip</button></form>''' if can_cancel else 'Meal started'
         skip_rows+=f"<tr><td>{sk['skip_date']}</td><td>{sk['meal']}</td><td>{action}</td></tr>"
+    upcoming=active_skips[0] if active_skips else None
+    upcoming_html=(f'''<h3>{escape(upcoming['meal'].title())} · {escape(upcoming['skip_date'])}</h3><span class="badge" style="background:#fff0c9;color:#b76a00">SKIPPED</span><form method="post" action="/student/cancel-skip" style="margin-top:14px"><input type="hidden" name="meal" value="{upcoming['meal']}"><input type="hidden" name="skip_date" value="{upcoming['skip_date']}"><button class="btn red" style="width:100%">Cancel Skip</button></form>''' if upcoming else '<p>No upcoming skipped meal.</p>')
+    recent_meals="".join(f'''<div class="activity"><span class="micon" style="width:38px;height:38px;font-size:18px">🍴</span><div style="flex:1"><b>{escape(r.get('meal','').title())}</b><br><small>{escape((r.get('used_at') or '')[:16])}</small></div><span class="status-open">PRESENT</span></div>''' for r in history[:5]) or '<p>No meal history yet.</p>'
+    month_days=[]; present_series=[]; skipped_series=[]
+    for day in [1,5,10,15,20,25,current_time().day]:
+        day=min(day,current_time().day)
+        if day in month_days: continue
+        month_days.append(day)
+        cutoff=f"{current_time().strftime('%Y-%m')}-{day:02d}"
+        present_series.append(sum(1 for r in history if (r.get('used_at') or '')[:10]<=cutoff))
+        skipped_series.append(sum(1 for s in list_skips(student_uid,month_start,today) if s.get('skip_date','')<=cutoff))
+    profile_photo=f'<img src="{photo}" alt="Student photo">' if photo else '<div class="micon" style="width:122px;height:122px;font-size:55px">👤</div>'
+    date_label=current_time().strftime("%d %b %Y, %A")
+    weekly=weekly_menu()
+    weekly_rows="".join(f'<tr><td><b>{day}</b></td><td>{escape(items.get("BREAKFAST","") or "-")}</td><td>{escape(items.get("LUNCH","") or "-")}</td><td>{escape(items.get("DINNER","") or "-")}</td></tr>' for day,items in weekly.items())
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Student Meals</title>
-        {CSS}{PWA_HEAD}
-    </head>
-
-    <body>
-
-    <div class="container">
-
-        <div class="nav"><a class="btn" href="/student/meals">🏠 Home</a><a class="btn blue" href="/student/complaints">💬 Feedback</a><a class="btn gray" href="/student/change-pin">🔐 Change PIN</a><button class="install-pwa" style="display:none" onclick="installSmartMess()">📲 Install App</button><a class="btn red" href="/student/logout">Logout</a></div>
-
-        <div class="card center">
-
-            {(
-                '<img class="big-photo" src="' +
-                photo +
-                '">'
-            ) if photo else ''}
-
-            <h1>
-                Hello, {student["name"]} 👋
-            </h1>
-
-            <p>
-                Registration No.: <b>{student["roll_number"]}</b>
-            </p>
-
-            <p>
-                Branch: <b>{student["branch"]}</b>
-            </p>
-
-            <p>
-                Room: <b>{student["hostel_room"]}</b>
-            </p>
-
-            <p>Hostel: <b>{student["hostel_name"] or "NOT SET"} {student["hostel_block"] or ""}</b></p>
-            <p>Last login: <b>{student.get("last_login") or "First login"}</b></p>
-
-        </div>
-
-
-        <div class="card">
-
-            {f'<div class="message"><b>📢 Notice:</b> {escape(notice)}</div>' if notice else ''}
-            <h2 class="center">🍽️ Today's Menu</h2>
-            <div class="grid">
-              <div class="stat"><b>Breakfast</b><p>{escape(menus['BREAKFAST'])}</p></div>
-              <div class="stat"><b>Lunch</b><p>{escape(menus['LUNCH'])}</p></div>
-              <div class="stat"><b>Dinner</b><p>{escape(menus['DINNER'])}</p></div>
-            </div>
-
-            <h2 class="center">
-                Select Meal
-            </h2>
-
-            <div class="grid" style="margin-bottom:20px;">{meal_status_cards}</div>
-
-            <div class="meal-buttons">
-
-                <form
-                    method="POST"
-                    action="/student/generate"
-                >
-
-                    <input
-                        type="hidden"
-                        name="meal"
-                        value="BREAKFAST"
-                    >
-
-                    <button type="submit">
-                        🌅 Breakfast
-                    </button>
-
-                </form>
-
-
-                <form
-                    method="POST"
-                    action="/student/generate"
-                >
-
-                    <input
-                        type="hidden"
-                        name="meal"
-                        value="LUNCH"
-                    >
-
-                    <button type="submit">
-                        ☀️ Lunch
-                    </button>
-
-                </form>
-
-
-                <form
-                    method="POST"
-                    action="/student/generate"
-                >
-
-                    <input
-                        type="hidden"
-                        name="meal"
-                        value="DINNER"
-                    >
-
-                    <button type="submit">
-                        🌙 Dinner
-                    </button>
-
-                </form>
-
-            </div>
-
-        </div>
-
-        <div class="grid">
-          <div class="card"><h2>⏭️ Skip a Meal</h2><p>Tell the mess in advance to reduce food waste.</p>
-            <form method="post" action="/student/skip-meal"><label>Meal</label><select name="meal"><option>BREAKFAST</option><option>LUNCH</option><option>DINNER</option></select>
-            <label>Date</label><select name="skip_date"><option value="{today}">Today</option><option value="{tomorrow}">Tomorrow</option></select><button class="btn red">Skip Meal</button></form>
-          </div>
-          <div class="card"><h2>📅 This Month History</h2><p>Total meals: <b>{len(history)}</b></p><div style="overflow:auto"><table><tr><th>Date</th><th>Meal</th><th>Time</th></tr>{history_rows or '<tr><td colspan="3">No meals yet.</td></tr>'}</table></div></div>
-        </div>
-        <div class="card"><h2>My Meal Skips</h2><table><tr><th>Date</th><th>Meal</th><th>Action</th></tr>{skip_rows or '<tr><td colspan="3">No active skips.</td></tr>'}</table></div>
-
-
-        <div class="card center">
-
-            <a
-                class="btn red"
-                href="/student/logout"
-            >
-                Student Logout
-            </a>
-
-        </div>
-
-    </div>
-
-    {PWA_SCRIPT}</body>
-    </html>
-    """
+    html=f"""<!doctype html><html><head><title>Student Dashboard</title>{CSS}{DASHBOARD_CSS}{PWA_HEAD}<script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body class="dash student-layout">
+    <aside class="side"><div class="brand" style="display:block;text-align:center"><img src="/static/icon-192.png" style="width:78px;height:78px"><p><b>{COLLEGE_NAME}</b></p></div><div class="side-title">🍽️ SmartMess</div><nav><a class="on" href="/student/meals">⌂ Dashboard</a><a href="#generate">▣ Generate QR Coupon</a><a href="#skip">⊘ Skip Meal</a><a href="#history">◷ Meal History</a><a href="#menu">▦ Weekly Menu</a><a href="/student/complaints">▣ Complaints & Feedback</a><a href="/student/change-pin">♢ Change PIN</a><a href="/student/logout">↪ Logout</a></nav><div class="side-foot">◷ Last Login<br><b>{escape(student.get('last_login') or 'First login')}</b></div></aside>
+    <main class="dash-main"><header class="dash-top"><h1>☰ &nbsp; Student Dashboard</h1><div><button class="install-pwa" onclick="installSmartMess()">⇩ Install App</button> &nbsp; 🔔 Notice &nbsp; 👤 <b>{escape(student['name'].split()[0])}</b></div></header><div class="dash-content">
+      <h2>Welcome, <span style="color:#075ee8">{escape(student['name'].split()[0])}</span> 👋</h2>
+      <section class="metric-row"><div class="dmetric profile-box">{profile_photo}<div><h2>{escape(student['name'])} <span class="status-open" style="font-size:12px">● Active</span></h2><p>▣ Registration No. {escape(student['roll_number'])}</p><p>⌂ {escape(student.get('hostel_name') or '')} {escape(student.get('hostel_block') or '')}</p><p>▯ Room {escape(student['hostel_room'])}</p></div></div><div id="generate" class="coupon-call"><div class="fakeqr">▦</div><div><h2>Generate QR Coupon</h2><p style="color:#e6f1ff">Scan at the mess to get your meal</p><a class="btn" href="#menu">Choose Meal ↓</a></div></div></section>
+      <section id="menu" style="margin-top:22px"><div class="welcome"><h2>Today's Menu</h2><a href="#weekly">View Weekly Menu ›</a></div><div class="menu-grid">
+       <div class="menu-card"><h3>🌅 Breakfast</h3><p>{escape(menus['BREAKFAST'])}</p><p>{get_setting('breakfast_start')} – {get_setting('breakfast_end')}</p><form method="post" action="/student/generate"><input type="hidden" name="meal" value="BREAKFAST"><button class="btn green">Generate Breakfast QR</button></form></div>
+       <div class="menu-card"><h3>☀️ Lunch</h3><p>{escape(menus['LUNCH'])}</p><p>{get_setting('lunch_start')} – {get_setting('lunch_end')}</p><form method="post" action="/student/generate"><input type="hidden" name="meal" value="LUNCH"><button class="btn blue">Generate Lunch QR</button></form></div>
+       <div class="menu-card"><h3>🌙 Dinner</h3><p>{escape(menus['DINNER'])}</p><p>{get_setting('dinner_start')} – {get_setting('dinner_end')}</p><form method="post" action="/student/generate"><input type="hidden" name="meal" value="DINNER"><button class="btn" style="background:#7948df">Generate Dinner QR</button></form></div>
+      </div></section>
+      <section class="student-lower"><div class="dpanel"><h3>Monthly Attendance</h3><canvas id="monthChart"></canvas></div><div id="history" class="dpanel"><h3>Recent Meal History</h3>{recent_meals}</div><div><div class="dpanel"><h3>Upcoming Skipped Meal</h3>{upcoming_html}</div><div id="skip" class="dpanel" style="margin-top:15px"><h3>Skip a Meal</h3><form method="post" action="/student/skip-meal"><select name="meal"><option>BREAKFAST</option><option>LUNCH</option><option>DINNER</option></select><select name="skip_date"><option value="{today}">Today</option><option value="{tomorrow}">Tomorrow</option></select><button class="btn red" style="width:100%">Skip Meal</button></form></div></div></section>
+      <section class="dpanel" style="margin-top:18px"><h3>Quick Actions</h3><div class="quick"><a href="#menu">▣ Generate QR</a><a href="#skip">⊘ Skip Meal</a><a href="#history">◷ Meal History</a><a href="/student/complaints">▣ Feedback</a><a href="/student/change-pin">♢ Change PIN</a></div></section>
+      <section id="weekly" class="dpanel" style="margin-top:18px"><h3>Weekly Menu</h3><div style="overflow:auto"><table><tr><th>Day</th><th>Breakfast</th><th>Lunch</th><th>Dinner</th></tr>{weekly_rows}</table></div></section>
+      {f'<div class="notice-bar">📣 <b>Notice:</b> {escape(notice)}</div>' if notice else ''}
+    </div></main><script>new Chart(document.getElementById('monthChart'),{{type:'line',data:{{labels:{json.dumps([str(d) for d in month_days])},datasets:[{{label:'Present',data:{json.dumps(present_series)},borderColor:'#16a85a',tension:.3}},{{label:'Skipped',data:{json.dumps(skipped_series)},borderColor:'#fa4965',tension:.3}}]}},options:{{responsive:true,scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}}}}}}}});</script>{PWA_SCRIPT}</body></html>"""
 
     return html
 
