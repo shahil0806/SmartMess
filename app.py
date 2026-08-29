@@ -59,9 +59,11 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "0") == "1",
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=15),
 )
 
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "shahil123")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-this-password")
+ADMIN_RECOVERY_KEY = os.environ.get("ADMIN_RECOVERY_KEY", "").strip()
 INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
 BRANCHES = [
     "AI & ML",
@@ -117,6 +119,7 @@ def init_db():
         "dinner_open": "1", "dinner_start": "19:00", "dinner_end": "22:00",
         "breakfast_menu": "", "lunch_menu": "", "dinner_menu": "",
         "student_notice": "Welcome to SmartMess.",
+        "weekly_menu": "{}",
     }
 
     if USE_MONGO:
@@ -127,6 +130,10 @@ def init_db():
         mongo_database.coupons.create_index([("student_uid", ASCENDING), ("meal", ASCENDING), ("generated_at", ASCENDING)])
         mongo_database.skipped_meals.create_index([("student_uid", ASCENDING), ("meal", ASCENDING), ("skip_date", ASCENDING)], unique=True)
         mongo_database.admins.create_index([("username", ASCENDING)], unique=True)
+        mongo_database.complaints.create_index([("student_uid", ASCENDING), ("created_at", ASCENDING)])
+        mongo_database.pin_requests.create_index([("student_uid", ASCENDING), ("status", ASCENDING)])
+        mongo_database.activity_logs.create_index([("created_at", ASCENDING)])
+        mongo_database.auth_attempts.create_index([("_id", ASCENDING)], unique=True)
         for key, value in defaults.items():
             mongo_database.settings.update_one({"_id": key}, {"$setOnInsert": {"value": value}}, upsert=True)
         for student in mongo_database.students.find({"$or": [{"pin_hash": {"$exists": False}}, {"pin_hash": ""}]}):
@@ -164,6 +171,32 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL, role TEXT NOT NULL, active INTEGER DEFAULT 1,
         created_at TEXT NOT NULL
+    )""")
+    for table, additions in {
+        "students": {"last_login":"TEXT", "pin_changed_at":"TEXT", "force_pin_change":"INTEGER DEFAULT 0"},
+        "coupons": {"extension_count":"INTEGER DEFAULT 0", "extended_at":"TEXT", "extended_by":"TEXT"},
+        "admins": {"last_login":"TEXT", "password_changed_at":"TEXT"},
+    }.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, definition in additions.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    conn.execute("""CREATE TABLE IF NOT EXISTS complaints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, student_uid TEXT NOT NULL, meal TEXT,
+        category TEXT NOT NULL, rating INTEGER, message TEXT NOT NULL, status TEXT DEFAULT 'OPEN',
+        admin_reply TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS pin_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, student_uid TEXT NOT NULL, hostel_room TEXT,
+        reason TEXT, status TEXT DEFAULT 'PENDING', created_at TEXT NOT NULL,
+        resolved_at TEXT, resolved_by TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT, role TEXT, action TEXT NOT NULL,
+        details TEXT, created_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS auth_attempts (
+        auth_key TEXT PRIMARY KEY, failed_attempts INTEGER DEFAULT 0, locked_until TEXT
     )""")
     for key, value in defaults.items():
         conn.execute("INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)", (key, value))
@@ -455,6 +488,99 @@ def add_admin_account(username, password, role):
                                       (data["username"], data["password_hash"], role, 1, data["created_at"])); conn.commit(); conn.close()
         return True
     except (DuplicateKeyError, sqlite3.IntegrityError): return False
+
+
+def log_activity(action, details="", actor=None, role=None):
+    item = {"actor": actor or session.get("admin_username", "system"),
+            "role": role or session.get("admin_role", "SYSTEM"), "action": action,
+            "details": str(details)[:500], "created_at": current_time().strftime("%Y-%m-%d %H:%M:%S")}
+    if USE_MONGO:
+        item["id"] = next_mongo_id("activity_logs"); mongo_database.activity_logs.insert_one(item)
+    else:
+        conn=db(); conn.execute("INSERT INTO activity_logs(actor,role,action,details,created_at) VALUES(?,?,?,?,?)",
+            (item["actor"],item["role"],item["action"],item["details"],item["created_at"])); conn.commit(); conn.close()
+
+
+def list_activity(limit=100):
+    if USE_MONGO: return list(mongo_database.activity_logs.find().sort("id",-1).limit(limit))
+    conn=db(); rows=conn.execute("SELECT * FROM activity_logs ORDER BY id DESC LIMIT ?",(limit,)).fetchall(); conn.close(); return [dict(r) for r in rows]
+
+
+def auth_state(key):
+    if USE_MONGO: return mongo_database.auth_attempts.find_one({"_id":key}) or {"failed_attempts":0,"locked_until":""}
+    conn=db(); row=conn.execute("SELECT * FROM auth_attempts WHERE auth_key=?",(key,)).fetchone(); conn.close(); return row_dict(row) or {"failed_attempts":0,"locked_until":""}
+
+
+def auth_locked(key):
+    state=auth_state(key); locked=state.get("locked_until") or ""
+    return bool(locked and current_time() < datetime.strptime(locked,"%Y-%m-%d %H:%M:%S"))
+
+
+def auth_fail(key):
+    state=auth_state(key); count=int(state.get("failed_attempts",0))+1
+    locked=(current_time()+timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S") if count>=5 else ""
+    if USE_MONGO: mongo_database.auth_attempts.update_one({"_id":key},{"$set":{"failed_attempts":count,"locked_until":locked}},upsert=True)
+    else:
+        conn=db(); conn.execute("INSERT OR REPLACE INTO auth_attempts(auth_key,failed_attempts,locked_until) VALUES(?,?,?)",(key,count,locked)); conn.commit(); conn.close()
+    return count
+
+
+def auth_clear(key):
+    if USE_MONGO: mongo_database.auth_attempts.delete_one({"_id":key})
+    else:
+        conn=db(); conn.execute("DELETE FROM auth_attempts WHERE auth_key=?",(key,)); conn.commit(); conn.close()
+
+
+def main_password_ok(password):
+    stored=get_setting("main_admin_password_hash","")
+    return check_password_hash(stored,password) if stored else hmac.compare_digest(password,ADMIN_PASSWORD)
+
+
+def delete_skip(uid, meal, skip_date):
+    if USE_MONGO: return mongo_database.skipped_meals.delete_one({"student_uid":uid,"meal":meal,"skip_date":skip_date}).deleted_count
+    conn=db(); cur=conn.execute("DELETE FROM skipped_meals WHERE student_uid=? AND meal=? AND skip_date=?",(uid,meal,skip_date)); conn.commit(); n=cur.rowcount; conn.close(); return n
+
+
+def default_weekly_menu():
+    return {day:{"BREAKFAST":"","LUNCH":"","DINNER":""} for day in ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
+
+
+def weekly_menu():
+    try:
+        data=json.loads(get_setting("weekly_menu","{}")); base=default_weekly_menu()
+        for day in base:
+            if isinstance(data.get(day),dict): base[day].update(data[day])
+        return base
+    except Exception: return default_weekly_menu()
+
+
+def add_complaint(uid, meal, category, rating, message):
+    item={"student_uid":uid,"meal":meal,"category":category,"rating":rating,"message":message,"status":"OPEN","admin_reply":"","created_at":current_time().strftime("%Y-%m-%d %H:%M:%S"),"updated_at":""}
+    if USE_MONGO: item["id"]=next_mongo_id("complaints"); mongo_database.complaints.insert_one(item)
+    else:
+        conn=db(); conn.execute("INSERT INTO complaints(student_uid,meal,category,rating,message,status,admin_reply,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",tuple(item[k] for k in ["student_uid","meal","category","rating","message","status","admin_reply","created_at","updated_at"])); conn.commit(); conn.close()
+
+
+def list_complaints(uid=""):
+    if USE_MONGO: return list(mongo_database.complaints.find({"student_uid":uid} if uid else {}).sort("id",-1))
+    conn=db(); rows=conn.execute("SELECT * FROM complaints"+(" WHERE student_uid=?" if uid else "")+" ORDER BY id DESC",((uid,) if uid else ())).fetchall(); conn.close(); return [dict(r) for r in rows]
+
+
+def add_pin_request(uid, room, reason):
+    item={"student_uid":uid,"hostel_room":room,"reason":reason,"status":"PENDING","created_at":current_time().strftime("%Y-%m-%d %H:%M:%S"),"resolved_at":"","resolved_by":""}
+    if USE_MONGO:
+        if mongo_database.pin_requests.find_one({"student_uid":uid,"status":"PENDING"}): return False
+        item["id"]=next_mongo_id("pin_requests"); mongo_database.pin_requests.insert_one(item)
+    else:
+        conn=db()
+        if conn.execute("SELECT 1 FROM pin_requests WHERE student_uid=? AND status='PENDING'",(uid,)).fetchone(): conn.close(); return False
+        conn.execute("INSERT INTO pin_requests(student_uid,hostel_room,reason,status,created_at,resolved_at,resolved_by) VALUES(?,?,?,?,?,?,?)",tuple(item[k] for k in ["student_uid","hostel_room","reason","status","created_at","resolved_at","resolved_by"])); conn.commit(); conn.close()
+    return True
+
+
+def list_pin_requests():
+    if USE_MONGO: return list(mongo_database.pin_requests.find().sort("id",-1))
+    conn=db(); rows=conn.execute("SELECT * FROM pin_requests ORDER BY id DESC").fetchall(); conn.close(); return [dict(r) for r in rows]
 
 
 @app.after_request
@@ -761,9 +887,14 @@ tr:hover td { background:#f8fbff; }
 .badge { font-weight:800; }
 .meal-buttons form,.meal-buttons button { width:100%; }
 .meal-buttons button { min-height:74px; background:linear-gradient(145deg,#102b4f,#2563eb); }
+.phase4-shell{display:grid;grid-template-columns:245px 1fr;min-height:100vh}.phase4-side{background:linear-gradient(180deg,#071a33,#102d55);padding:28px 18px;color:white;position:sticky;top:0;height:100vh}.phase4-side h2{color:white}.phase4-side a{display:block;color:#dbeafe;text-decoration:none;padding:11px 13px;margin:5px 0;border-radius:10px}.phase4-side a:hover{background:rgba(255,255,255,.12)}.phase4-main{padding:26px}.phase4-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.phase4-top h1{margin:0}.phase4-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:15px}.phase4-metric{background:white;border:1px solid #e5edf7;border-radius:18px;padding:20px;box-shadow:0 10px 30px rgba(15,35,65,.07)}.phase4-metric b{font-size:30px;display:block;margin-top:8px}.install-pwa{background:#0ea5e9;color:white;border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
 @media(max-width:650px) { .container{margin:18px auto}.card{border-radius:20px;padding:20px}.nav{position:sticky;top:8px;z-index:20;overflow-x:auto;flex-wrap:nowrap}.nav .btn{white-space:nowrap}h1{font-size:27px} }
+@media(max-width:800px){.phase4-shell{display:block}.phase4-side{position:relative;height:auto}.phase4-side nav{display:flex;overflow:auto}.phase4-side a{white-space:nowrap}.phase4-main{padding:16px}}
 </style>
 """
+
+PWA_HEAD='''<link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#081b33">'''
+PWA_SCRIPT='''<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js');let deferredPrompt;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;document.querySelectorAll('.install-pwa').forEach(b=>b.style.display='inline-block')});async function installSmartMess(){if(deferredPrompt){deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null}}</script>'''
 
 
 # =========================================================
@@ -801,29 +932,44 @@ def admin_login():
         username = request.form.get("username", "main").strip().lower() or "main"
         password = request.form.get("password", "")
 
-        if username in ["main", "admin"] and hmac.compare_digest(password, ADMIN_PASSWORD):
+        key="admin:"+username
+        if auth_locked(key):
+            error="Too many wrong attempts. Try again after 15 minutes."
+        elif username in ["main", "admin"] and main_password_ok(password):
 
+            auth_clear(key)
             session["admin"] = True
             session["admin_role"] = "MAIN"
             session["admin_username"] = "main"
+            session.permanent=True
+            log_activity("ADMIN_LOGIN","Main admin login",actor="main",role="MAIN")
 
             return redirect(url_for("admin_dashboard"))
 
         account = find_admin(username)
-        if account and account.get("active", 1) and check_password_hash(account["password_hash"], password):
+        if not error and account and account.get("active", 1) and check_password_hash(account["password_hash"], password):
+            auth_clear(key)
             session["admin"] = True
             session["admin_role"] = account["role"]
             session["admin_username"] = account["username"]
+            session.permanent=True
+            now=current_time().strftime("%Y-%m-%d %H:%M:%S")
+            if USE_MONGO: mongo_database.admins.update_one({"id":account["id"]},{"$set":{"last_login":now}})
+            else:
+                conn=db(); conn.execute("UPDATE admins SET last_login=? WHERE id=?",(now,account["id"])); conn.commit(); conn.close()
+            log_activity("ADMIN_LOGIN","Successful login")
             return redirect(url_for("admin_scanner" if account["role"] == "SCANNER" else "admin_dashboard"))
 
-        error = "Wrong admin password."
+        if not error:
+            attempts=auth_fail(key); error = "Wrong username or password."
+            log_activity("ADMIN_LOGIN_FAILED",f"Username: {username}; attempt {attempts}",actor=username,role="UNKNOWN")
 
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Admin Login</title>
-        {CSS}
+        {CSS}{PWA_HEAD}
     </head>
 
     <body>
@@ -853,6 +999,8 @@ def admin_login():
                     Login
                 </button>
 
+                <a href="/admin/forgot-password" style="display:block;margin-top:18px">Forgot Password?</a>
+
             </form>
 
         </div>
@@ -863,6 +1011,23 @@ def admin_login():
     """
 
     return html
+
+
+@app.route("/admin/forgot-password",methods=["GET","POST"])
+def admin_forgot_password():
+    message=""; ok=False; key="recovery:"+(request.remote_addr or "unknown")
+    if request.method=="POST":
+        username=request.form.get("username","").strip().lower(); recovery=request.form.get("recovery_key",""); password=request.form.get("new_password","")
+        if auth_locked(key): message="Reset is locked for 15 minutes."
+        elif not ADMIN_RECOVERY_KEY: message="Recovery is not configured. Set ADMIN_RECOVERY_KEY on Render."
+        elif username not in ["main","admin"] or not hmac.compare_digest(recovery,ADMIN_RECOVERY_KEY):
+            auth_fail(key); message="Username or Recovery Key is incorrect."
+        elif len(password)<8: message="New password must contain at least 8 characters."
+        else:
+            save_settings({"main_admin_password_hash":generate_password_hash(password)})
+            auth_clear(key); ok=True; message="Password changed. You can now login."
+            log_activity("MAIN_PASSWORD_RESET","Recovery key reset",actor="main",role="MAIN")
+    return f'''<!doctype html><html><head><title>Admin Password Recovery</title>{CSS}</head><body><div class="container"><div class="card" style="max-width:540px;margin:70px auto"><h1>🔑 Admin Password Recovery</h1><p>Only Main Admin can use the private recovery key.</p>{f'<div class="message {"success" if ok else "error"}">{escape(message)}</div>' if message else ''}<form method="post"><label>Username</label><input name="username" value="main" required><label>Private Recovery Key</label><input type="password" name="recovery_key" required><label>New Password</label><input type="password" name="new_password" minlength="8" required><button class="btn green">Reset Password</button> <a class="btn gray" href="/admin">Back</a></form></div></div></body></html>'''
 
 
 @app.route("/admin/logout")
@@ -930,7 +1095,9 @@ def verify_coupon():
 
         return jsonify({
             "success": False,
-            "message": "Coupon expired. 5-minute validity ended."
+            "message": "Coupon expired. 5-minute validity ended.",
+            "can_extend": (coupon.get("generated_at") or "")[:10] == current_time().date().isoformat() and int(coupon.get("extension_count", 0) or 0) < 1,
+            "token": token
         })
 
     # ---------------------------------------------------------
@@ -1066,12 +1233,13 @@ def admin_dashboard():
     <html>
     <head>
         <title>Admin Dashboard</title>
-        {CSS}
+        {CSS}{PWA_HEAD}
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
 
-    <body>
-    <div class="container">
+    <body><div class="phase4-shell">
+    <aside class="phase4-side"><h2>🍽️ SmartMess</h2><p style="color:#93c5fd">{escape(session.get('admin_role','MAIN').title())} Admin</p><nav><a href="/admin/dashboard">▦ Overview</a><a href="/admin/students">👥 Students</a><a href="/admin/scanner">▣ QR Scanner</a><a href="/admin/reports">▤ Reports</a><a href="/admin/weekly-menu">▦ Weekly Menu</a><a href="/admin/complaints">💬 Feedback</a><a href="/admin/pin-requests">🔑 PIN Requests</a><a href="/admin/logout">↪ Logout</a></nav></aside>
+    <main class="phase4-main"><div class="container" style="width:100%;margin:0;max-width:none">
 
         <h1>🍽️ Smart Mess Admin Panel</h1>
 
@@ -1099,7 +1267,11 @@ def admin_dashboard():
 
             <a class="btn blue" href="/admin/reports">📥 Reports</a>
             <a class="btn green" href="/admin/menu-notice">📋 Menu & Notice</a>
+            <a class="btn blue" href="/admin/weekly-menu">📅 Weekly Menu</a>
+            <a class="btn blue" href="/admin/complaints">💬 Feedback</a>
+            <a class="btn gray" href="/admin/pin-requests">🔑 PIN Requests</a>
             {'<a class="btn gray" href="/admin/roles">🔐 Admin Roles</a>' if admin_required(['MAIN']) else ''}
+            {'<a class="btn gray" href="/admin/activity-log">🛡️ Activity Log</a>' if admin_required(['MAIN']) else ''}
 
             <a class="btn green" href="/admin/meal-settings">
                 ⏰ Meal Settings
@@ -1108,6 +1280,7 @@ def admin_dashboard():
             <a class="btn red" href="/admin/logout">
                 Logout
             </a>
+            <button class="install-pwa" style="display:none" onclick="installSmartMess()">📲 Install App</button>
 
         </div>
 
@@ -1161,7 +1334,7 @@ def admin_dashboard():
           <div class="card"><h2>Last 30 Days</h2><canvas id="chart30"></canvas></div>
         </div>
 
-    </div>
+    </div></main></div>
     <script>
     function draw(id, data) {{ new Chart(document.getElementById(id), {{type:'line',data:{{labels:data.labels,datasets:[
       {{label:'Breakfast',data:data.breakfast,borderColor:'#f59e0b',tension:.35}},
@@ -1170,7 +1343,7 @@ def admin_dashboard():
     ]}},options:{{responsive:true,plugins:{{legend:{{position:'bottom'}}}},scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}}}}}}}}); }}
     draw('chart7', {chart7}); draw('chart30', {chart30});
     </script>
-    </body>
+    {PWA_SCRIPT}</body>
     </html>
     """
 
@@ -1266,16 +1439,16 @@ def admin_add_student():
         roll = request.form.get("roll_number", "").strip()
         branch = request.form.get("branch", "").strip()
         room = request.form.get("hostel_room", "").strip()
-        gender = request.form.get("gender", "").strip().upper()
-        if admin_scope_gender(): gender = admin_scope_gender()
         hostel_name = request.form.get("hostel_name", "").strip()
-        hostel_block = request.form.get("hostel_block", "").strip()
+        if admin_scope_gender(): hostel_name = "Boys Hostel" if admin_scope_gender()=="BOY" else "Girls Hostel"
+        gender = "BOY" if hostel_name == "Boys Hostel" else "GIRL" if hostel_name == "Girls Hostel" else ""
+        hostel_block = request.form.get("hostel_block", "").strip() if hostel_name=="Boys Hostel" else ""
         pin = request.form.get("pin", "").strip()
         photo = request.files.get("photo")
 
         if (not name or not roll or branch not in BRANCHES or not room or
                 gender not in ["BOY", "GIRL"] or hostel_name not in ["Boys Hostel", "Girls Hostel"] or
-                hostel_block not in HOSTEL_BLOCKS or len(pin) != 4 or not pin.isdigit()):
+                (hostel_name=="Boys Hostel" and hostel_block not in HOSTEL_BLOCKS) or len(pin) != 4 or not pin.isdigit()):
 
             message = "Please fill every field."
             message_class = "message error"
@@ -1398,26 +1571,19 @@ def admin_add_student():
                     required
                 >
 
-                <label>Gender</label>
-                <select name="gender" required>
-                    <option value="">Select Boy/Girl</option>
-                    <option value="BOY">Boy</option>
-                    <option value="GIRL">Girl</option>
-                </select>
-
                 <label>Hostel</label>
-                <select name="hostel_name" required>
+                <select name="hostel_name" id="hostel" onchange="toggleBlock()" required>
                     <option value="">Select Hostel</option>
                     <option value="Boys Hostel">Boys Hostel</option>
                     <option value="Girls Hostel">Girls Hostel</option>
                 </select>
 
-                <label>Hostel Block</label>
-                <select name="hostel_block" required>
+                <div id="blockWrap"><label>Hostel Block (Boys Hostel only)</label>
+                <select name="hostel_block" id="block">
                     <option value="">Select Hostel Block</option>
                     <option value="BH-1">BH-1</option>
                     <option value="BH-2">BH-2</option>
-                </select>
+                </select></div>
 
                 <label>4-digit Student PIN</label>
                 <input type="password" name="pin" inputmode="numeric" minlength="4" maxlength="4" pattern="[0-9]{{4}}" required>
@@ -1440,7 +1606,7 @@ def admin_add_student():
         </div>
 
     </div>
-    </body>
+    <script>function toggleBlock(){{const boys=document.getElementById('hostel').value==='Boys Hostel';document.getElementById('blockWrap').style.display=boys?'block':'none';document.getElementById('block').required=boys;if(!boys)document.getElementById('block').value='';}}toggleBlock();</script></body>
     </html>
     """
 
@@ -1601,15 +1767,15 @@ def admin_edit_student(student_id):
         registration = request.form.get("registration_number", "").strip()
         branch = request.form.get("branch", "").strip()
         room = request.form.get("hostel_room", "").strip()
-        gender = request.form.get("gender", "").strip().upper()
-        if admin_scope_gender(): gender = admin_scope_gender()
         hostel_name = request.form.get("hostel_name", "").strip()
-        hostel_block = request.form.get("hostel_block", "").strip()
+        if admin_scope_gender(): hostel_name = "Boys Hostel" if admin_scope_gender()=="BOY" else "Girls Hostel"
+        gender = "BOY" if hostel_name=="Boys Hostel" else "GIRL" if hostel_name=="Girls Hostel" else ""
+        hostel_block = request.form.get("hostel_block", "").strip() if hostel_name=="Boys Hostel" else ""
         pin = request.form.get("pin", "").strip()
         photo = request.files.get("photo")
         if (not name or not registration or branch not in BRANCHES or not room or
                 gender not in ["BOY", "GIRL"] or hostel_name not in ["Boys Hostel", "Girls Hostel"] or
-                hostel_block not in HOSTEL_BLOCKS):
+                (hostel_name=="Boys Hostel" and hostel_block not in HOSTEL_BLOCKS)):
             message = "Please fill all required fields."
         elif pin and (len(pin) != 4 or not pin.isdigit()):
             message = "New PIN must contain exactly 4 numbers."
@@ -1653,16 +1819,15 @@ def admin_edit_student(student_id):
       <label>Branch</label><select name="branch" required>
         {''.join(f'<option value="{escape(branch)}" {"selected" if student["branch"] == branch else ""}>{escape(branch)}</option>' for branch in BRANCHES)}
       </select>
-      <label>Gender</label><select name="gender" required><option value="BOY" {'selected' if student['gender']=='BOY' else ''}>Boy</option><option value="GIRL" {'selected' if student['gender']=='GIRL' else ''}>Girl</option></select>
-      <label>Hostel</label><select name="hostel_name" required><option value="Boys Hostel" {'selected' if student['hostel_name']=='Boys Hostel' else ''}>Boys Hostel</option><option value="Girls Hostel" {'selected' if student['hostel_name']=='Girls Hostel' else ''}>Girls Hostel</option></select>
-      <label>Hostel Block</label><select name="hostel_block" required>
+      <label>Hostel</label><select name="hostel_name" id="hostel" onchange="toggleBlock()" required><option value="Boys Hostel" {'selected' if student['hostel_name']=='Boys Hostel' else ''}>Boys Hostel</option><option value="Girls Hostel" {'selected' if student['hostel_name']=='Girls Hostel' else ''}>Girls Hostel</option></select>
+      <div id="blockWrap"><label>Hostel Block (Boys Hostel only)</label><select name="hostel_block" id="block">
         {''.join(f'<option value="{block}" {"selected" if student["hostel_block"] == block else ""}>{block}</option>' for block in HOSTEL_BLOCKS)}
-      </select>
+      </select></div>
       <label>Room Number</label><input name="hostel_room" value="{escape(student['hostel_room'])}" required>
       <label>Reset 4-digit PIN (optional)</label><input type="password" name="pin" inputmode="numeric" minlength="4" maxlength="4" pattern="[0-9]{{4}}" placeholder="Leave blank to keep current PIN">
       <label>Change Photo (optional)</label><input type="file" name="photo" accept="image/*">
       <button class="btn green" type="submit">Save Changes</button>
-    </form></div></div></body></html>"""
+    </form></div></div><script>function toggleBlock(){{const boys=document.getElementById('hostel').value==='Boys Hostel';document.getElementById('blockWrap').style.display=boys?'block':'none';document.getElementById('block').required=boys;if(!boys)document.getElementById('block').value='';}}toggleBlock();</script></body></html>"""
     return html
 
 
@@ -1757,6 +1922,7 @@ def student_home():
                 <button class="btn blue" type="submit">
                     Verify Student
                 </button>
+                <a href="/student/forgot-pin" style="display:block;margin-top:18px">Forgot PIN?</a>
 
             </form>
 
@@ -1786,10 +1952,14 @@ def student_verify():
         ""
     ).strip()
     pin = request.form.get("pin", "").strip()
+    key="student:"+roll
+    if auth_locked(key):
+        return f'''<!doctype html><html><head>{CSS}</head><body><div class="container"><div class="card center"><h1>🔒 Login Locked</h1><div class="message error">Too many wrong attempts. Try again after 15 minutes.</div><a class="btn" href="/student">Back</a></div></div></body></html>'''
     student = student_by_roll(roll, active_only=True)
 
     if not student or not student.get("pin_hash") or not check_password_hash(student["pin_hash"], pin):
 
+        auth_fail(key)
         return f"""
         <!DOCTYPE html>
         <html>
@@ -1818,13 +1988,42 @@ def student_verify():
         </html>
         """
 
-    session["student_uid"] = student["student_uid"]
+    auth_clear(key); session["student_uid"] = student["student_uid"]; session.permanent=True
+    update_student_record(student["id"],{"last_login":current_time().strftime("%Y-%m-%d %H:%M:%S")})
+    if student.get("force_pin_change"):
+        return redirect(url_for("student_change_pin"))
 
     return redirect(
         url_for(
             "student_meals"
         )
     )
+
+
+@app.route("/student/forgot-pin",methods=["GET","POST"])
+def student_forgot_pin():
+    message=""
+    if request.method=="POST":
+        roll=request.form.get("roll_number","").strip(); room=request.form.get("hostel_room","").strip(); reason=request.form.get("reason","").strip()
+        student=student_by_roll(roll,active_only=True)
+        if student and hmac.compare_digest(str(student.get("hostel_room","")),room): add_pin_request(student["student_uid"],room,reason)
+        message="Request submitted. Contact your hostel admin for the temporary PIN."
+    return f'''<!doctype html><html><head><title>Forgot PIN</title>{CSS}</head><body><div class="container"><div class="card" style="max-width:560px;margin:60px auto"><h1>🔑 Forgot PIN Request</h1>{f'<div class="message success">{message}</div>' if message else ''}<form method="post"><label>Registration Number</label><input name="roll_number" required><label>Hostel Room</label><input name="hostel_room" required><label>Reason</label><input name="reason" maxlength="200"><button class="btn blue">Send Request</button> <a class="btn gray" href="/student">Back</a></form></div></div></body></html>'''
+
+
+@app.route("/student/change-pin",methods=["GET","POST"])
+def student_change_pin():
+    uid=session.get("student_uid")
+    if not uid:return redirect(url_for("student_home"))
+    student=student_by_uid(uid,active_only=True); message=""; ok=False
+    if request.method=="POST":
+        old=request.form.get("old_pin",""); new=request.form.get("new_pin",""); confirm=request.form.get("confirm_pin","")
+        if not check_password_hash(student["pin_hash"],old): message="Current PIN is incorrect."
+        elif not re.fullmatch(r"\d{4}",new) or new in ["0000","1111","1234","4321"]: message="Choose a stronger 4-digit PIN."
+        elif new!=confirm: message="New PIN confirmation does not match."
+        else:
+            update_student_record(student["id"],{"pin_hash":generate_password_hash(new),"pin_changed_at":current_time().strftime("%Y-%m-%d %H:%M:%S"),"force_pin_change":0}); ok=True; message="PIN changed successfully."
+    return f'''<!doctype html><html><head><title>Change PIN</title>{CSS}</head><body><div class="container"><div class="card" style="max-width:560px;margin:50px auto"><h1>🔐 Change PIN</h1>{f'<div class="message {"success" if ok else "error"}">{escape(message)}</div>' if message else ''}<form method="post"><label>Current PIN</label><input type="password" name="old_pin" pattern="[0-9]{{4}}" required><label>New 4-digit PIN</label><input type="password" name="new_pin" pattern="[0-9]{{4}}" required><label>Confirm New PIN</label><input type="password" name="confirm_pin" pattern="[0-9]{{4}}" required><button class="btn green">Change PIN</button> <a class="btn gray" href="/student/meals">Back</a></form></div></div></body></html>'''
 
 
 # =========================================================
@@ -1867,21 +2066,29 @@ def student_meals():
     month_start = current_time().strftime("%Y-%m-01")
     history = list_used_records(month_start, today, registration=student["roll_number"])
     history_rows = "".join(f"<tr><td>{(r.get('used_at') or '')[:10]}</td><td>{r.get('meal','-')}</td><td>{(r.get('used_at') or '')[11:19]}</td></tr>" for r in history[:31])
-    menus = {meal: get_setting(meal.lower() + "_menu", "Menu not updated") or "Menu not updated" for meal in ["BREAKFAST", "LUNCH", "DINNER"]}
+    today_menu=weekly_menu().get(current_time().strftime("%A"),{})
+    menus = {meal: today_menu.get(meal) or get_setting(meal.lower() + "_menu", "Menu not updated") or "Menu not updated" for meal in ["BREAKFAST", "LUNCH", "DINNER"]}
     notice = get_setting("student_notice", "")
     tomorrow = (current_time().date() + timedelta(days=1)).isoformat()
+    skip_rows=""
+    for sk in list_skips(student_uid,today,tomorrow):
+        can_cancel=sk['skip_date']>today or current_time().strftime('%H:%M')<get_setting(sk['meal'].lower()+'_start','00:00')
+        action=f'''<form method="post" action="/student/cancel-skip"><input type="hidden" name="meal" value="{sk['meal']}"><input type="hidden" name="skip_date" value="{sk['skip_date']}"><button class="btn gray">Cancel Skip</button></form>''' if can_cancel else 'Meal started'
+        skip_rows+=f"<tr><td>{sk['skip_date']}</td><td>{sk['meal']}</td><td>{action}</td></tr>"
 
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Student Meals</title>
-        {CSS}
+        {CSS}{PWA_HEAD}
     </head>
 
     <body>
 
     <div class="container">
+
+        <div class="nav"><a class="btn" href="/student/meals">🏠 Home</a><a class="btn blue" href="/student/complaints">💬 Feedback</a><a class="btn gray" href="/student/change-pin">🔐 Change PIN</a><button class="install-pwa" style="display:none" onclick="installSmartMess()">📲 Install App</button><a class="btn red" href="/student/logout">Logout</a></div>
 
         <div class="card center">
 
@@ -1907,8 +2114,8 @@ def student_meals():
                 Room: <b>{student["hostel_room"]}</b>
             </p>
 
-            <p>Gender: <b>{student["gender"] or "NOT SET"}</b></p>
             <p>Hostel: <b>{student["hostel_name"] or "NOT SET"} {student["hostel_block"] or ""}</b></p>
+            <p>Last login: <b>{student.get("last_login") or "First login"}</b></p>
 
         </div>
 
@@ -1995,6 +2202,7 @@ def student_meals():
           </div>
           <div class="card"><h2>📅 This Month History</h2><p>Total meals: <b>{len(history)}</b></p><div style="overflow:auto"><table><tr><th>Date</th><th>Meal</th><th>Time</th></tr>{history_rows or '<tr><td colspan="3">No meals yet.</td></tr>'}</table></div></div>
         </div>
+        <div class="card"><h2>My Meal Skips</h2><table><tr><th>Date</th><th>Meal</th><th>Action</th></tr>{skip_rows or '<tr><td colspan="3">No active skips.</td></tr>'}</table></div>
 
 
         <div class="card center">
@@ -2010,7 +2218,7 @@ def student_meals():
 
     </div>
 
-    </body>
+    {PWA_SCRIPT}</body>
     </html>
     """
 
@@ -2169,6 +2377,28 @@ def student_skip_meal():
     success = add_skip_record(uid, meal, skip_date)
     text = "Skip meal saved. Thank you for helping reduce food waste." if success else "This meal is already marked as skipped."
     return f"""<!DOCTYPE html><html><head><title>Skip Meal</title>{CSS}</head><body><div class="container"><div class="card center"><h1>⏭️ Skip Meal</h1><div class="message {'success' if success else 'error'}">{text}</div><a class="btn" href="/student/meals">Back to Meals</a></div></div></body></html>"""
+
+
+@app.route("/student/cancel-skip",methods=["POST"])
+def student_cancel_skip():
+    uid=session.get("student_uid"); meal=request.form.get("meal","").upper(); day=request.form.get("skip_date","")
+    if not uid:return redirect(url_for("student_home"))
+    today=current_time().date().isoformat()
+    if meal not in ["BREAKFAST","LUNCH","DINNER"] or day<today:return "Cancellation not allowed.",400
+    if day==today and current_time().strftime("%H:%M")>=get_setting(meal.lower()+"_start","00:00"): return "Meal start time has passed; skip cannot be cancelled.",400
+    delete_skip(uid,meal,day)
+    return redirect(url_for("student_meals"))
+
+
+@app.route("/student/complaints",methods=["GET","POST"])
+def student_complaints():
+    uid=session.get("student_uid")
+    if not uid:return redirect(url_for("student_home"))
+    if request.method=="POST":
+        category=request.form.get("category",""); meal=request.form.get("meal",""); message=request.form.get("message","").strip(); rating=int(request.form.get("rating","0") or 0)
+        if category in ["Food Quality","Hygiene","Service","Other"] and meal in ["BREAKFAST","LUNCH","DINNER","GENERAL"] and 1<=rating<=5 and 5<=len(message)<=500: add_complaint(uid,meal,category,rating,message)
+    rows="".join(f'<tr><td>{escape(c["created_at"][:10])}</td><td>{escape(c["category"])}</td><td>{"★"*int(c.get("rating",0))}</td><td>{escape(c["message"])}</td><td>{escape(c.get("status","OPEN"))}<br><small>{escape(c.get("admin_reply","") or "")}</small></td></tr>' for c in list_complaints(uid))
+    return f'''<!doctype html><html><head><title>Feedback</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/student/meals">Dashboard</a></div><div class="card"><h1>💬 Complaint & Feedback</h1><form method="post"><div class="grid"><div><label>Category</label><select name="category"><option>Food Quality</option><option>Hygiene</option><option>Service</option><option>Other</option></select></div><div><label>Meal</label><select name="meal"><option>GENERAL</option><option>BREAKFAST</option><option>LUNCH</option><option>DINNER</option></select></div><div><label>Rating</label><select name="rating"><option value="5">5 - Excellent</option><option value="4">4 - Good</option><option value="3">3 - Average</option><option value="2">2 - Poor</option><option value="1">1 - Bad</option></select></div></div><label>Message</label><input name="message" minlength="5" maxlength="500" required><button class="btn blue">Submit</button></form></div><div class="card"><h2>My Requests</h2><div style="overflow:auto"><table><tr><th>Date</th><th>Category</th><th>Rating</th><th>Message</th><th>Status / Reply</th></tr>{rows or '<tr><td colspan="5">No feedback yet.</td></tr>'}</table></div></div></div></body></html>'''
 
 
 # =========================================================
@@ -2461,12 +2691,38 @@ def admin_roles():
         if len(username) < 3 or len(password) < 8 or role not in ["BOYS", "GIRLS", "SCANNER"]: message = "Use 3+ character username and 8+ character password."
         elif add_admin_account(username, password, role): message = "Admin account created successfully."
         else: message = "Username already exists."
-    rows = "".join(f"<tr><td>{escape(a['username'])}</td><td>{a['role']}</td><td>{'Active' if a.get('active',1) else 'Inactive'}</td></tr>" for a in list_admins())
+    rows = "".join(f"<tr><td>{escape(a['username'])}</td><td>{a['role']}</td><td>{'Active' if a.get('active',1) else 'Inactive'}</td><td>{escape(a.get('last_login') or 'Never')}</td><td><form method='post' action='/admin/role/{a['id']}/toggle'><button class='btn gray'>Toggle</button></form><form method='post' action='/admin/role/{a['id']}/reset'><input name='password' type='password' minlength='8' placeholder='New password' required><button class='btn blue'>Reset</button></form></td></tr>" for a in list_admins())
     return f"""<!DOCTYPE html><html><head><title>Admin Roles</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div>
     <div class="card"><h1>🔐 Admin Roles</h1>{f'<div class="message">{escape(message)}</div>' if message else ''}<form method="post"><div class="grid">
     <div><label>Username</label><input name="username" required></div><div><label>Password</label><input type="password" name="password" minlength="8" required></div>
     <div><label>Role</label><select name="role"><option value="BOYS">Boys Hostel Admin</option><option value="GIRLS">Girls Hostel Admin</option><option value="SCANNER">Scanner Operator</option></select></div></div>
-    <button class="btn green">Create Account</button></form></div><div class="card"><table><tr><th>Username</th><th>Role</th><th>Status</th></tr>{rows}</table></div></div></body></html>"""
+    <button class="btn green">Create Account</button></form></div><div class="card"><table><tr><th>Username</th><th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th></tr>{rows}</table></div></div></body></html>"""
+
+
+@app.route("/admin/role/<int:admin_id>/toggle",methods=["POST"])
+def admin_role_toggle(admin_id):
+    if not admin_required(["MAIN"]):return redirect(url_for("admin_login"))
+    account=next((a for a in list_admins() if a["id"]==admin_id),None)
+    if account:
+        active=0 if account.get("active",1) else 1
+        if USE_MONGO:mongo_database.admins.update_one({"id":admin_id},{"$set":{"active":active}})
+        else:
+            conn=db();conn.execute("UPDATE admins SET active=? WHERE id=?",(active,admin_id));conn.commit();conn.close()
+        log_activity("ADMIN_STATUS_CHANGED",f"{account['username']} active={active}")
+    return redirect(url_for("admin_roles"))
+
+
+@app.route("/admin/role/<int:admin_id>/reset",methods=["POST"])
+def admin_role_reset(admin_id):
+    if not admin_required(["MAIN"]):return redirect(url_for("admin_login"))
+    password=request.form.get("password","")
+    if len(password)>=8:
+        account=next((a for a in list_admins() if a["id"]==admin_id),None); now=current_time().strftime("%Y-%m-%d %H:%M:%S"); password_hash=generate_password_hash(password)
+        if USE_MONGO:mongo_database.admins.update_one({"id":admin_id},{"$set":{"password_hash":password_hash,"password_changed_at":now}})
+        else:
+            conn=db();conn.execute("UPDATE admins SET password_hash=?,password_changed_at=? WHERE id=?",(password_hash,now,admin_id));conn.commit();conn.close()
+        if account:log_activity("ADMIN_PASSWORD_RESET",account["username"])
+    return redirect(url_for("admin_roles"))
 
 # =========================================================
 # ADMIN QR SCANNER
@@ -2656,6 +2912,8 @@ def admin_scanner():
                     + data.message
                     + "</p>"
 
+                    + (data.can_extend ? "<button class='btn blue' onclick=\"extendCoupon('" + data.token + "')\">Add 5 Minutes</button>" : "")
+
                     + "</div>";
             }}
 
@@ -2683,6 +2941,13 @@ def admin_scanner():
             2000
         );
 
+    }}
+
+    async function extendCoupon(token) {{
+      const response=await fetch('/admin/extend-coupon',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token}})}});
+      const data=await response.json();
+      document.getElementById('result').innerHTML='<div class="message '+(data.success?'success':'error')+'"><h2>'+(data.success?'⏱️ QR EXTENDED':'❌ NOT EXTENDED')+'</h2><p>'+data.message+'</p></div>';
+      sound(data.success); processing=false;
     }}
 
     function scanSuccess(
@@ -2850,6 +3115,107 @@ def admin_records():
     """
 
     return html
+
+
+# =========================================================
+# PHASE 4: OPERATIONS, SECURITY AND PWA
+# =========================================================
+
+@app.route("/admin/weekly-menu",methods=["GET","POST"])
+def admin_weekly_menu():
+    if not admin_required(["MAIN","BOYS","GIRLS"]):return redirect(url_for("admin_login"))
+    menu=weekly_menu(); message=""
+    if request.method=="POST":
+        for day in menu:
+            for meal in menu[day]: menu[day][meal]=request.form.get(f"{day}_{meal}","").strip()[:150]
+        save_settings({"weekly_menu":json.dumps(menu)}); message="Weekly menu saved."; log_activity("WEEKLY_MENU_UPDATED")
+    rows="".join(f'<tr><td><b>{day}</b></td>'+''.join(f'<td><input name="{day}_{meal}" value="{escape(menu[day][meal])}"></td>' for meal in ["BREAKFAST","LUNCH","DINNER"])+"</tr>" for day in menu)
+    return f'''<!doctype html><html><head><title>Weekly Menu</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div><div class="card"><h1>📅 Weekly Menu</h1>{f'<div class="message success">{message}</div>' if message else ''}<form method="post"><div style="overflow:auto"><table><tr><th>Day</th><th>Breakfast</th><th>Lunch</th><th>Dinner</th></tr>{rows}</table></div><button class="btn green">Save Weekly Menu</button></form></div></div></body></html>'''
+
+
+@app.route("/admin/complaints",methods=["GET","POST"])
+def admin_complaints():
+    if not admin_required(["MAIN","BOYS","GIRLS"]):return redirect(url_for("admin_login"))
+    if request.method=="POST":
+        cid=int(request.form.get("id","0")); status=request.form.get("status",""); reply=request.form.get("reply","").strip()[:500]
+        if status in ["OPEN","IN_PROGRESS","RESOLVED"]:
+            changes={"status":status,"admin_reply":reply,"updated_at":current_time().strftime("%Y-%m-%d %H:%M:%S")}
+            if USE_MONGO:mongo_database.complaints.update_one({"id":cid},{"$set":changes})
+            else:
+                conn=db(); conn.execute("UPDATE complaints SET status=?,admin_reply=?,updated_at=? WHERE id=?",(status,reply,changes["updated_at"],cid));conn.commit();conn.close()
+            log_activity("COMPLAINT_UPDATED",f"Complaint #{cid}: {status}")
+    students={s["student_uid"]:s for s in list_student_records(gender=admin_scope_gender())}
+    cards=""
+    for c in list_complaints():
+        s=students.get(c["student_uid"])
+        if not s:continue
+        cards+=f'''<div class="card"><h3>{escape(s['name'])} · {escape(c['category'])} · {'★'*int(c.get('rating',0))}</h3><p>{escape(c['message'])}</p><form method="post"><input type="hidden" name="id" value="{c['id']}"><select name="status"><option {'selected' if c.get('status')=='OPEN' else ''}>OPEN</option><option {'selected' if c.get('status')=='IN_PROGRESS' else ''}>IN_PROGRESS</option><option {'selected' if c.get('status')=='RESOLVED' else ''}>RESOLVED</option></select><input name="reply" value="{escape(c.get('admin_reply','') or '')}" placeholder="Admin reply"><button class="btn blue">Update</button></form></div>'''
+    return f'''<!doctype html><html><head><title>Complaints</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div><h1>💬 Complaints & Feedback</h1>{cards or '<div class="card">No complaints.</div>'}</div></body></html>'''
+
+
+@app.route("/admin/pin-requests")
+def admin_pin_requests():
+    if not admin_required(["MAIN","BOYS","GIRLS"]):return redirect(url_for("admin_login"))
+    allowed={s["student_uid"]:s for s in list_student_records(gender=admin_scope_gender())}; rows=""
+    for item in list_pin_requests():
+        s=allowed.get(item["student_uid"])
+        if not s:continue
+        action=f'<form method="post" action="/admin/pin-request/{item["id"]}/reset"><button class="btn green">Generate Temporary PIN</button></form>' if item["status"]=="PENDING" else "Resolved"
+        rows+=f'<tr><td>{escape(s["name"])}</td><td>{escape(s["roll_number"])}</td><td>{escape(item.get("hostel_room", ""))}</td><td>{escape(item.get("reason", ""))}</td><td>{item["status"]}</td><td>{action}</td></tr>'
+    return f'''<!doctype html><html><head><title>PIN Requests</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div><div class="card"><h1>🔑 Forgot PIN Requests</h1><div style="overflow:auto"><table><tr><th>Student</th><th>Registration</th><th>Room</th><th>Reason</th><th>Status</th><th>Action</th></tr>{rows or '<tr><td colspan="6">No requests.</td></tr>'}</table></div></div></div></body></html>'''
+
+
+@app.route("/admin/pin-request/<int:request_id>/reset",methods=["POST"])
+def admin_pin_reset(request_id):
+    if not admin_required(["MAIN","BOYS","GIRLS"]):return redirect(url_for("admin_login"))
+    items=[r for r in list_pin_requests() if r["id"]==request_id]
+    if not items:return "Request not found",404
+    item=items[0]; student=student_by_uid(item["student_uid"])
+    if not student or (admin_scope_gender() and student.get("gender")!=admin_scope_gender()):return "Not allowed",403
+    pin=f"{secrets.randbelow(10000):04d}"; update_student_record(student["id"],{"pin_hash":generate_password_hash(pin),"force_pin_change":1,"pin_changed_at":current_time().strftime("%Y-%m-%d %H:%M:%S")})
+    changes=("RESOLVED",current_time().strftime("%Y-%m-%d %H:%M:%S"),session.get("admin_username"))
+    if USE_MONGO:mongo_database.pin_requests.update_one({"id":request_id},{"$set":{"status":changes[0],"resolved_at":changes[1],"resolved_by":changes[2]}})
+    else:
+        conn=db();conn.execute("UPDATE pin_requests SET status=?,resolved_at=?,resolved_by=? WHERE id=?",(*changes,request_id));conn.commit();conn.close()
+    log_activity("STUDENT_PIN_RESET",f"Student {student['roll_number']}")
+    return f'''<!doctype html><html><head>{CSS}</head><body><div class="container"><div class="card center"><h1>Temporary PIN</h1><p>Give this PIN privately to <b>{escape(student['name'])}</b>. It is shown only on this screen.</p><div class="countdown">{pin}</div><p>Student must change it after login.</p><a class="btn" href="/admin/pin-requests">Done</a></div></div></body></html>'''
+
+
+@app.route("/admin/activity-log")
+def admin_activity_log():
+    if not admin_required(["MAIN"]):return redirect(url_for("admin_dashboard"))
+    rows="".join(f'<tr><td>{escape(x["created_at"])}</td><td>{escape(x.get("actor", ""))}</td><td>{escape(x.get("role", ""))}</td><td>{escape(x["action"])}</td><td>{escape(x.get("details", ""))}</td></tr>' for x in list_activity())
+    return f'''<!doctype html><html><head><title>Activity Log</title>{CSS}</head><body><div class="container"><div class="nav"><a class="btn" href="/admin/dashboard">Dashboard</a></div><div class="card"><h1>🛡️ Admin Activity Log</h1><div style="overflow:auto"><table><tr><th>Time</th><th>Admin</th><th>Role</th><th>Action</th><th>Details</th></tr>{rows or '<tr><td colspan="5">No activity.</td></tr>'}</table></div></div></div></body></html>'''
+
+
+@app.route("/admin/extend-coupon",methods=["POST"])
+def extend_coupon():
+    if not admin_required():return jsonify({"success":False,"message":"Admin login required."}),401
+    token=str((request.get_json(silent=True) or {}).get("token","")).strip(); coupon=coupon_by_token(token)
+    if not coupon or coupon.get("status")=="USED":return jsonify({"success":False,"message":"Coupon cannot be extended."})
+    if (coupon.get("generated_at") or "")[:10]!=current_time().date().isoformat() or int(coupon.get("extension_count",0) or 0)>=1:return jsonify({"success":False,"message":"Only today's expired coupon can be extended once."})
+    expiry=datetime.strptime(coupon["expires_at"],"%Y-%m-%d %H:%M:%S")
+    if current_time()<=expiry:return jsonify({"success":False,"message":"Coupon is still active."})
+    new_expiry=(current_time()+timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    update_coupon(coupon["id"],{"expires_at":new_expiry,"status":"ACTIVE","extension_count":1,"extended_at":current_time().strftime("%Y-%m-%d %H:%M:%S"),"extended_by":session.get("admin_username")})
+    log_activity("QR_EXTENDED",f"Coupon {token[-6:]} +5 minutes")
+    return jsonify({"success":True,"message":"Coupon extended for 5 minutes. Scan it again."})
+
+
+@app.route("/manifest.json")
+def manifest():
+    return jsonify({"name":"SmartMess","short_name":"SmartMess","start_url":"/student","display":"standalone","background_color":"#f4f7fb","theme_color":"#081b33","icons":[{"src":"/static/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/static/icon-512.png","sizes":"512x512","type":"image/png"}]})
+
+
+@app.route("/service-worker.js")
+def service_worker():
+    script="""const C='smartmess-v4';self.addEventListener('install',e=>e.waitUntil(caches.open(C).then(c=>c.addAll(['/offline','/static/icon-192.png','/static/icon-512.png']))));self.addEventListener('fetch',e=>{if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(()=>caches.match('/offline')))}});"""
+    return Response(script,mimetype="application/javascript",headers={"Service-Worker-Allowed":"/"})
+
+
+@app.route("/offline")
+def offline():
+    return f'''<!doctype html><html><head>{CSS}</head><body><div class="container"><div class="card center"><h1>📴 You are offline</h1><p>Login, coupon generation and scanning need an internet connection.</p></div></div></body></html>'''
 
 
 # =========================================================

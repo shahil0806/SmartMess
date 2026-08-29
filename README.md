@@ -2,6 +2,10 @@
 
 Premium hostel mess coupon and attendance system built with Flask, MongoDB Atlas and secure one-time QR coupons.
 
+## Phase 4
+
+Phase 4 adds premium dashboards, weekly menu, meal skip cancellation, complaints/feedback, student PIN recovery, role security and activity logs, one-time QR extension, and installable PWA support. See `PHASE4_SETUP_HINDI.md` for deployment instructions.
+
 ## Phase 3 Premium Features
 
 - Professional Excel and PDF attendance reports with date, gender, meal and student filters
