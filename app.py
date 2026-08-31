@@ -2438,7 +2438,7 @@ def admin_scanner():
 
         {CSS}
 
-        <script src="https://unpkg.com/html5-qrcode"></script>
+        <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 
         <style>
             #reader {{
@@ -2659,24 +2659,36 @@ def admin_scanner():
 
     }}
 
-    const scanner =
-        new Html5QrcodeScanner(
+    function startQrScanner() {{
+        if (typeof Html5QrcodeScanner === "undefined") return false;
+        const scanner = new Html5QrcodeScanner(
             "reader",
             {{
                 fps: 10,
-                qrbox: {{
-                    width: 250,
-                    height: 250
-                }},
-                rememberLastUsedCamera: true
+                qrbox: {{ width: 250, height: 250 }},
+                rememberLastUsedCamera: true,
+                supportedScanTypes: [
+                    Html5QrcodeScanType.SCAN_TYPE_CAMERA,
+                    Html5QrcodeScanType.SCAN_TYPE_FILE
+                ]
             }},
             false
         );
+        scanner.render(scanSuccess, scanFailure);
+        return true;
+    }}
 
-    scanner.render(
-        scanSuccess,
-        scanFailure
-    );
+    if (!startQrScanner()) {{
+        const backup = document.createElement("script");
+        backup.src = "https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js";
+        backup.onload = function() {{ startQrScanner(); }};
+        backup.onerror = function() {{
+            document.getElementById("reader").innerHTML =
+                '<div class="message error"><h2>Scanner could not load</h2>' +
+                '<p>Please check internet connection, disable web protection for this site, and refresh.</p></div>';
+        }};
+        document.head.appendChild(backup);
+    }}
 
     </script>
 
