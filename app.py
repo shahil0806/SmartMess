@@ -2606,9 +2606,15 @@ def admin_scanner():
                     + data.message
                     + "</p>"
 
-                    + (data.can_extend ? "<button class='btn blue' onclick=\"extendCoupon('" + data.token + "')\">Add 5 Minutes</button>" : "")
+                    + (data.can_extend ? "<button class='btn blue' id='extendCouponBtn'>Add 5 Minutes</button>" : "")
 
                     + "</div>";
+
+                if (data.can_extend) {{
+                    document.getElementById("extendCouponBtn").onclick = function() {{
+                        extendCoupon(data.token);
+                    }};
+                }}
             }}
 
         }} catch (error) {{
