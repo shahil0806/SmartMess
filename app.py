@@ -893,6 +893,7 @@ tr:hover td { background:#f8fbff; }
 """
 
 PWA_HEAD='''<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#081b33">'''
+PWA_ADMIN_HEAD='''<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><link rel="manifest" href="/admin-manifest.json"><meta name="theme-color" content="#06265f">'''
 PWA_SCRIPT='''<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js');let deferredPrompt;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;document.querySelectorAll('.install-pwa').forEach(b=>b.style.display='inline-block')});async function installSmartMess(){if(deferredPrompt){deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null}}</script>'''
 
 DASHBOARD_CSS="""
@@ -973,7 +974,7 @@ def admin_login():
             attempts=auth_fail(key); error = "Wrong username or password."
             log_activity("ADMIN_LOGIN_FAILED",f"Username: {username}; attempt {attempts}",actor=username,role="UNKNOWN")
 
-    html = f"""<!doctype html><html><head><title>Admin Login | SmartMess</title>{CSS}{DASHBOARD_CSS}{PWA_HEAD}</head><body class="login-page">
+    html = f"""<!doctype html><html><head><title>Admin Login | SmartMess</title>{CSS}{DASHBOARD_CSS}{PWA_ADMIN_HEAD}</head><body class="login-page">
     <main class="login-shell"><section class="login-hero"><div class="login-logo"><img src="/static/icon-192.png" alt="College logo"><div><strong>Government Polytechnic, Barh</strong><span>SmartMess Management System</span></div></div><div class="login-hero-content"><h1>SmartMess</h1><p>Smart Mess Management System</p><div class="login-features"><div class="login-feature"><i><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></i> Manage Students</div><div class="login-feature"><i><svg viewBox="0 0 24 24"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><rect x="8" y="8" width="3" height="3"/><rect x="13" y="8" width="3" height="3"/><rect x="8" y="13" width="3" height="3"/><path d="M14 14h2v2"/></svg></i> QR Scanner &amp; Approval</div><div class="login-feature"><i><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/></svg></i> Reports &amp; Activity Log</div></div></div><div class="login-building">GOVERNMENT POLYTECHNIC · BARH</div></section>
     <section class="login-pane"><div class="login-box admin-login-box"><nav class="login-tabs"><a href="/student"><span class="tab-icon"><svg viewBox="0 0 24 24"><path d="m3 10 9-5 9 5-9 5zM7 12v5c3 2 7 2 10 0v-5M21 10v6"/></svg></span>Student</a><a class="on" href="/admin"><span class="tab-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="12" cy="9" r="2.2"/><path d="M8.5 16c.7-2 2-3 3.5-3s2.8 1 3.5 3"/></svg></span>Admin</a></nav><h2>Admin Portal</h2><p class="sub">Authorized staff access only</p>{'<div class="message error">' + escape(error) + '</div>' if error else ''}<form method="post"><span class="role-label">Login as</span><div class="role-options"><input id="roleMain" type="radio" name="login_role" value="MAIN" checked><label for="roleMain">Main Admin</label><input id="roleHostel" type="radio" name="login_role" value="HOSTEL"><label for="roleHostel">Hostel Admin</label><input id="roleScanner" type="radio" name="login_role" value="SCANNER"><label for="roleScanner">Scanner Operator</label></div><label>Username</label><input name="username" value="main" autocomplete="username" required><label>Password</label><div class="field-wrap"><input id="loginSecret" type="password" name="password" autocomplete="current-password" required><button type="button" class="eye-btn" onclick="toggleSecret()" aria-label="Show password"><svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div><div class="remember-help"><label class="remember-check"><input type="checkbox" name="remember"> Remember this device</label><a href="/admin/forgot-password">Forgot Password?</a></div><button class="login-primary" type="submit">Secure Admin Login</button></form><div class="security-note"><span class="security-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></span><span>All admin activity is securely monitored.</span></div></div></section></main>
     <script>function toggleSecret(){{const x=document.getElementById('loginSecret');x.type=x.type==='password'?'text':'password'}};</script>{PWA_SCRIPT}</body></html>"""
@@ -1202,10 +1203,10 @@ def admin_dashboard():
     role_label = {"MAIN":"Super Administrator","BOYS":"Boys Hostel Admin","GIRLS":"Girls Hostel Admin"}.get(session.get("admin_role"),"Administrator")
     date_label = current_time().strftime("%d %b %Y, %A")
 
-    html = f"""<!doctype html><html><head><title>Admin Dashboard</title>{CSS}{DASHBOARD_CSS}{PWA_HEAD}<script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body class="dash">
+    html = f"""<!doctype html><html><head><title>Admin Dashboard</title>{CSS}{DASHBOARD_CSS}{PWA_ADMIN_HEAD}<script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body class="dash">
     <aside class="side"><div class="brand"><img src="/static/icon-192.png"><b>{COLLEGE_NAME}</b></div><div class="side-title">🍽️ SmartMess</div><nav>
       <a class="on" href="/admin/dashboard">▦ Admin Dashboard</a><a href="/admin/scanner">▣ Scanner</a><a href="/admin/students">♙ Students</a><a href="/admin/meal-settings">♨ Meal Settings</a><a href="/admin/weekly-menu">▦ Weekly Menu</a><a href="/admin/reports">▤ Reports</a><a href="/admin/complaints">◉ Complaints</a>{'<a href="/admin/activity-log">▣ Activity Log</a><a href="/admin/roles">⚙ Admin Roles</a>' if admin_required(['MAIN']) else ''}<a href="/admin/logout">↪ Logout</a></nav><div class="side-foot">📅 Today<br><b>{date_label}</b></div></aside>
-    <main class="dash-main"><header class="dash-top"><h1>Admin Dashboard</h1><div>🔔 &nbsp; 👤 <b>{escape(session.get('admin_username','Admin')).title()}</b><br><small>{role_label}</small></div></header><div class="dash-content">
+    <main class="dash-main"><header class="dash-top"><h1>Admin Dashboard</h1><div><button class="install-pwa" style="display:none" onclick="installSmartMess()">⇩ Install Admin App</button> &nbsp; 🔔 &nbsp; 👤 <b>{escape(session.get('admin_username','Admin')).title()}</b><br><small>{role_label}</small></div></header><div class="dash-content">
       <section class="welcome"><div><h2>Welcome back, Admin! 👋</h2><span>Here's what's happening in your mess today.</span></div><div class="date-pill">📅 {date_label}</div></section>
       <section class="metric-row">
        <div class="dmetric"><span class="micon">♙</span><div>Total Students<strong>{student_count}</strong><small>Across all hostels</small></div></div>
@@ -2438,6 +2439,7 @@ def admin_scanner():
         <title>Mess QR Scanner</title>
 
         {CSS}
+        {PWA_ADMIN_HEAD}
 
         <script src="/static/html5-qrcode.min.js?v=2.3.8"></script>
 
@@ -2479,6 +2481,11 @@ def admin_scanner():
                href="/admin/records">
                 📊 Records
             </a>
+
+            <button class="install-pwa" style="display:none"
+                    onclick="installSmartMess()">
+                ⇩ Install Admin App
+            </button>
 
             <a class="btn red"
                href="/admin/logout">
@@ -2699,6 +2706,8 @@ def admin_scanner():
 
     </script>
 
+    {PWA_SCRIPT}
+
     </body>
     </html>
     """
@@ -2917,7 +2926,12 @@ def extend_coupon():
 
 @app.route("/manifest.json")
 def manifest():
-    return jsonify({"name":"SmartMess","short_name":"SmartMess","start_url":"/student","display":"standalone","background_color":"#f4f7fb","theme_color":"#081b33","icons":[{"src":"/static/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/static/icon-512.png","sizes":"512x512","type":"image/png"}]})
+    return jsonify({"id":"/student","name":"SmartMess Student","short_name":"SmartMess Student","start_url":"/student","scope":"/","display":"standalone","background_color":"#f4f7fb","theme_color":"#081b33","icons":[{"src":"/static/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/static/icon-512.png","sizes":"512x512","type":"image/png"}]})
+
+
+@app.route("/admin-manifest.json")
+def admin_manifest():
+    return jsonify({"id":"/admin","name":"SmartMess Admin","short_name":"SmartMess Admin","start_url":"/admin/dashboard","scope":"/","display":"standalone","background_color":"#f4f7fb","theme_color":"#06265f","icons":[{"src":"/static/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/static/icon-512.png","sizes":"512x512","type":"image/png"}]})
 
 
 @app.route("/service-worker.js")
